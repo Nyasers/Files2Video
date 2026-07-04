@@ -25,6 +25,7 @@ module.exports = [
       hot: false,
       liveReload: false,
       open: false,
+      client: { overlay: false },
       static: { directory: distDir },
     },
     module: {
@@ -46,7 +47,7 @@ module.exports = [
       }),
       new rspack.CopyRspackPlugin({
         patterns: [
-          { from: path.resolve(__dirname, "src/assets") },
+          { from: path.resolve(__dirname, "src/assets"), noErrorOnMissing: true },
         ],
       }),
     ],

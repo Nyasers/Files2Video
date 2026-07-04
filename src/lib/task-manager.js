@@ -10,18 +10,21 @@ const tasks = new Map();
 export function addTask(jobId, kind, label) {
   const node = clone("task-item");
   if (!node) return;
-  node.querySelector(".task-kind").textContent = kind === "encode" ? "🎬 编码" : "📂 解码";
-  node.querySelector(".task-label").textContent = label || "";
-  node.querySelector(".task-file").textContent = "";
-  node.querySelector(".tbar").style.width = "0%";
-  node.querySelector(".task-pct").textContent = "0%";
+  const el = node.firstElementChild;
+  if (!el) return;
+  el.querySelector(".task-kind").textContent =
+    kind === "encode" ? "🎬 编码" : "📂 解码";
+  el.querySelector(".task-label").textContent = label || "";
+  el.querySelector(".task-file").textContent = "";
+  el.querySelector(".tbar").style.width = "0%";
+  el.querySelector(".task-pct").textContent = "0%";
 
   const empty = tasksList.querySelector(".tasks-empty");
   if (empty) empty.remove();
 
   tasksList.appendChild(node);
   tasks.set(jobId, {
-    el: node,
+    el,
     kind,
     progress: 0,
     status: "running",

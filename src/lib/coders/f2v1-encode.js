@@ -24,6 +24,7 @@ import {
   writeAVIHeader,
   writeChunkHeader,
   writeINDX,
+  writeIDX1,
   buildFileEntries,
   FRAME0_HEADER_SIZE,
   F2V1,
@@ -50,7 +51,14 @@ export async function prepareIndexParams(files, password, nameBufs) {
   const encMagic = emFull.subarray(0, 4);
   const fileEntries = buildFileEntries(files, nameBufs);
 
-  return { encKey, frameSalt, iter, encMagic, fileEntries, fileCount: files.length };
+  return {
+    encKey,
+    frameSalt,
+    iter,
+    encMagic,
+    fileEntries,
+    fileCount: files.length,
+  };
 }
 
 // ═══════════════════════════════════════════════════
@@ -68,16 +76,17 @@ export async function encodeFrame0(push, params, frameInfo, opts) {
   opts?.onProgress?.(0);
 
   // ── 明文头 28B ──
-  wtr.w32BE(F2V1);        // magic
-  wtr.wBytes(encMagic);   // 4B
-  wtr.wBytes(frameSalt);  // 16B
-  wtr.w32BE(iter);        // 4B
+  wtr.w32BE(F2V1); // magic
+  wtr.wBytes(encMagic); // 4B
+  wtr.wBytes(frameSalt); // 16B
+  wtr.w32BE(iter); // 4B
 
   // ── 加密区: fileCount(8B BE) + fileEntries ──
   const metaPlain = new Uint8Array(8 + fileEntries.length);
   // fileCount (大端 8B)
   let off = 0;
-  for (let i = 7; i >= 0; i--) metaPlain[off++] = (fileCount >>> (i * 8)) & 0xff;
+  for (let i = 7; i >= 0; i--)
+    metaPlain[off++] = (fileCount >>> (i * 8)) & 0xff;
   metaPlain.set(fileEntries, 8);
 
   const encrypted = await aesEncrypt(metaPlain, encKey, frameSalt, 1, 128);
@@ -107,7 +116,15 @@ export async function encodeFrame0(push, params, frameInfo, opts) {
  * @param {function}   [opts.onProgress]
  * @returns {number} 此帧数据长度 (用于更新 cumulative)
  */
-export async function encodeDataFrame(push, frame, files, encKey, frameSalt, cumulativeBefore, opts) {
+export async function encodeDataFrame(
+  push,
+  frame,
+  files,
+  encKey,
+  frameSalt,
+  cumulativeBefore,
+  opts,
+) {
   const CHUNK = (opts?.chunkSize || 64) * 1024;
 
   opts?.onProgress?.(0);
@@ -122,13 +139,23 @@ export async function encodeDataFrame(push, frame, files, encKey, frameSalt, cum
     if (opts?.isCancelled?.()) return totalWritten;
 
     const take = Math.min(remaining, CHUNK);
-    const data = await readFileDataRange(files, frame.dataOffset + offset, take);
+    const data = await readFileDataRange(
+      files,
+      frame.dataOffset + offset,
+      take,
+    );
 
     // prePad 对齐: 插入前导零，加密后去掉
     const aligned = Math.ceil((prePad + data.length) / 16) * 16;
     const padded = new Uint8Array(aligned);
     padded.set(data, prePad);
-    const encrypted = await aesEncrypt(padded, encKey, frameSalt, blockOff, 128);
+    const encrypted = await aesEncrypt(
+      padded,
+      encKey,
+      frameSalt,
+      blockOff,
+      128,
+    );
 
     // 推入: 去掉 prePad 对齐零
     push(encrypted.subarray(prePad, prePad + data.length));
@@ -145,7 +172,11 @@ export async function encodeDataFrame(push, frame, files, encKey, frameSalt, cum
     opts?.onProgress?.(totalWritten / frame.dataSize);
   }
 
-  opts?.onProgress?.(1);
+  try {
+    opts?.onProgress?.(1);
+  } catch (e) {
+    console.error("encodeDataFrame onProgress threw:", e);
+  }
   return totalWritten;
 }
 
@@ -181,7 +212,11 @@ export function buildF2VStream(frameInfo, files, password, w, h, fps, opts) {
   return new ReadableStream({
     async start(controller) {
       const push = (d) => controller.enqueue(d);
-      const closeStream = () => { try { controller.close(); } catch {} };
+      const closeStream = () => {
+        try {
+          controller.close();
+        } catch {}
+      };
       const isCancelled = () => opts?.isCancelled?.() || false;
 
       const reportProgress = (fraction, idx) => {
@@ -197,7 +232,11 @@ export function buildF2VStream(frameInfo, files, password, w, h, fps, opts) {
         if (isCancelled()) return;
 
         // ── 加密参数 ──
-        const params = await prepareIndexParams(files, password, frameInfo.nameBufs);
+        const params = await prepareIndexParams(
+          files,
+          password,
+          frameInfo.nameBufs,
+        );
         if (isCancelled()) return;
 
         let cumulative = 0; // 累计加密字节数
@@ -209,6 +248,7 @@ export function buildF2VStream(frameInfo, files, password, w, h, fps, opts) {
           cumulative = await encodeFrame0(push, params, fi, {
             onProgress: (f) => reportProgress(f, 0),
           });
+          if (fi.chunkSize % 2 !== 0) push(new Uint8Array([0])); // WORD 对齐
           if (isCancelled()) return;
         }
 
@@ -217,16 +257,29 @@ export function buildF2VStream(frameInfo, files, password, w, h, fps, opts) {
           if (isCancelled()) return;
           const fi = frames[i];
           writeChunkHeader(push, fi.dataSize);
-          const written = await encodeDataFrame(push, fi, files, params.encKey, params.frameSalt, cumulative, {
-            chunkSize: opts?.chunkSize,
-            isCancelled,
-            onProgress: (f) => reportProgress(f, i),
-          });
+          const written = await encodeDataFrame(
+            push,
+            fi,
+            files,
+            params.encKey,
+            params.frameSalt,
+            cumulative,
+            {
+              chunkSize: opts?.chunkSize,
+              isCancelled,
+              onProgress: (f) => reportProgress(f, i),
+            },
+          );
           cumulative += written;
+          if (fi.chunkSize % 2 !== 0) push(new Uint8Array([0])); // WORD 对齐
           if (isCancelled()) return;
         }
 
-        // ── indx ──
+        // ── RIFF WORD 对齐填充 ──
+        if (aviIndex.moviPad) push(new Uint8Array([0]));
+
+        // ── idx1 + indx ──
+        writeIDX1(push, aviIndex.idx1Buf);
         writeINDX(push, aviIndex.indxBuf);
 
         closeStream();

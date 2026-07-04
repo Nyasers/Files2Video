@@ -31,7 +31,12 @@ async function readBlob(blob, start, length) {
 // ── 4 字节比较 ──
 
 function tagEq(buf, off, a, b, c, d) {
-  return buf[off] === a && buf[off + 1] === b && buf[off + 2] === c && buf[off + 3] === d;
+  return (
+    buf[off] === a &&
+    buf[off + 1] === b &&
+    buf[off + 2] === c &&
+    buf[off + 3] === d
+  );
 }
 
 // ═══════════════════════════════════════════════════
@@ -46,7 +51,9 @@ export async function parseAVI(blob) {
   if (!tagEq(buf, 8, 0x41, 0x56, 0x49, 0x20)) throw Error("不是 AVI 格式");
 
   let off = 12;
-  let w = 0, h = 0, fps = 30;
+  let w = 0,
+    h = 0,
+    fps = 30;
   let moviStart = 0;
   const rawFrames = []; // { absOffset, size }
 
@@ -58,11 +65,13 @@ export async function parseAVI(blob) {
     const size = v.getUint32(4, true);
     off += 8;
 
-    if (id === 0x5453494c) { // 'LIST'
+    if (id === 0x5453494c) {
+      // 'LIST'
       const ft = await readBlob(blob, off, 4);
       if (ft.length < 4) break;
 
-      if (tagEq(ft, 0, 0x68, 0x64, 0x72, 0x6c)) { // 'hdrl'
+      if (tagEq(ft, 0, 0x68, 0x64, 0x72, 0x6c)) {
+        // 'hdrl'
         const end = off + size;
         off += 4;
         while (off < end) {
@@ -72,11 +81,15 @@ export async function parseAVI(blob) {
           const csz = new DataView(buf.buffer).getUint32(4, true);
           off += 8;
 
-          if (cid === 0x68697661) { // 'avih'
+          if (cid === 0x68697661) {
+            // 'avih'
             const ah = await readBlob(blob, off, 56);
-            fps = Math.round(1000000 / new DataView(ah.buffer).getUint32(0, true));
+            fps = Math.round(
+              1000000 / new DataView(ah.buffer).getUint32(0, true),
+            );
             off += csz;
-          } else if (cid === 0x5453494c) { // 'LIST' (strl)
+          } else if (cid === 0x5453494c) {
+            // 'LIST' (strl)
             off += 4;
             const strlEnd = off + csz - 4;
             while (off < strlEnd) {
@@ -84,7 +97,8 @@ export async function parseAVI(blob) {
               const scid = new DataView(buf.buffer).getUint32(0, true);
               const scsz = new DataView(buf.buffer).getUint32(4, true);
               off += 8;
-              if (scid === 0x66727473) { // 'strf'
+              if (scid === 0x66727473) {
+                // 'strf'
                 const sf = await readBlob(blob, off, 40);
                 const sfv = new DataView(sf.buffer);
                 w = sfv.getUint32(4, true);
@@ -100,21 +114,27 @@ export async function parseAVI(blob) {
           }
           if (csz % 2 !== 0) off++;
         }
-      } else if (tagEq(ft, 0, 0x6d, 0x6f, 0x76, 0x69)) { // 'movi'
+      } else if (tagEq(ft, 0, 0x6d, 0x6f, 0x76, 0x69)) {
+        // 'movi'
         moviStart = off + 4; // movi data 起始
-        off += size - 4;
+        off += size; // 跳过 form type(4) + data(size-4) = 整个 size 字节
       } else {
-        off += size - 4;
+        off += size;
       }
-    } else if (id === 0x78646e69) { // 'indx'
-      const entryCount = Math.floor(size / 16);
-      const idxBuf = await readBlob(blob, off, entryCount * 16);
+    } else if (id === 0x78646e69) {
+      // 'indx'
+      // 标准 AVISTDINDEX: 24B sub-header + entries
+      const subHdr = await readBlob(blob, off, 24);
+      const shv = new DataView(subHdr.buffer);
+      const nEntries = shv.getUint32(4, true); // nEntriesInUse at offset 4 from sub-header base
+      const entryCount = Math.min(nEntries, Math.floor((size - 24) / 24));
+      const idxBuf = await readBlob(blob, off + 24, entryCount * 24);
       const iv = new DataView(idxBuf.buffer);
       for (let i = 0; i < entryCount; i++) {
-        const base = i * 16;
-        const foff = iv.getUint32(base + 8, true);   // movi-relative
-        const fsz = iv.getUint32(base + 16, true);    // chunk size
-        rawFrames.push({ frameID: i, absOffset: moviStart + foff, size: fsz });
+        const base = i * 24;
+        const foff = iv.getUint32(base + 8, true); // movi-relative
+        const dsz = iv.getUint32(base + 16, true); // dataSize（不含 chunk header）
+        rawFrames.push({ frameID: i, absOffset: moviStart + foff, size: dsz + 8 }); // 转为 chunkSize
       }
       off += size;
     } else {
@@ -142,7 +162,9 @@ export async function parseAVI(blob) {
   const totalFileData = fileDataOff;
 
   return {
-    w, h, fps,
+    w,
+    h,
+    fps,
     metaFrame,
     dataFrames,
     totalFileData,
@@ -198,7 +220,7 @@ export async function readFrame0(blob, metaFrame, password) {
     frameSalt,
     iter,
     fileCount,
-    entriesEnd,        // 加密区中元数据结束偏移 (用于累计加密字节)
+    entriesEnd, // 加密区中元数据结束偏移 (用于累计加密字节)
   };
 }
 
@@ -210,7 +232,15 @@ export async function readFrame0(blob, metaFrame, password) {
  * 从帧列表中提取指定文件数据范围的 AES-CTR 对齐解密
  * 帧 0 之后的每一帧连续接续 AES-CTR 流
  */
-async function decryptFromFrames(blob, dataFrames, key, frameSalt, indexInfo, rangeStart, rangeLen) {
+async function decryptFromFrames(
+  blob,
+  dataFrames,
+  key,
+  frameSalt,
+  indexInfo,
+  rangeStart,
+  rangeLen,
+) {
   if (rangeLen <= 0) return new Uint8Array(0);
 
   const result = new Uint8Array(rangeLen);
@@ -240,7 +270,13 @@ async function decryptFromFrames(blob, dataFrames, key, frameSalt, indexInfo, ra
     const encrypted = await readBlob(blob, readOff, alignedLen);
     if (encrypted.length < alignedLen) break;
 
-    const decrypted = await aesDecrypt(encrypted, key, frameSalt, blockOff, 128);
+    const decrypted = await aesDecrypt(
+      encrypted,
+      key,
+      frameSalt,
+      blockOff,
+      128,
+    );
     const slice = decrypted.subarray(prePad, prePad + len);
     result.set(slice, written);
     written += slice.length;
@@ -257,27 +293,57 @@ export async function extractFileData(blob, indexInfo, dataFrames, fileIdx) {
   const entry = indexInfo.entries[fileIdx];
   if (!entry) throw Error("文件索引无效: " + fileIdx);
   if (entry.size === 0) return new Uint8Array(0);
-  return decryptFromFrames(blob, dataFrames, indexInfo.key, indexInfo.frameSalt, indexInfo, entry.globalOffset, entry.size);
+  return decryptFromFrames(
+    blob,
+    dataFrames,
+    indexInfo.key,
+    indexInfo.frameSalt,
+    indexInfo,
+    entry.globalOffset,
+    entry.size,
+  );
 }
 
 /**
  * 提取单个文件的指定范围（流式下载用）
  */
-export async function extractFileDataRange(blob, indexInfo, dataFrames, fileIdx, rangeStart, rangeLen) {
+export async function extractFileDataRange(
+  blob,
+  indexInfo,
+  dataFrames,
+  fileIdx,
+  rangeStart,
+  rangeLen,
+) {
   const entry = indexInfo.entries[fileIdx];
   if (!entry) throw Error("文件索引无效: " + fileIdx);
 
-  if (rangeStart == null) return extractFileData(blob, indexInfo, dataFrames, fileIdx);
+  if (rangeStart == null)
+    return extractFileData(blob, indexInfo, dataFrames, fileIdx);
   const fileEnd = entry.globalOffset + entry.size;
   const readStart = entry.globalOffset + rangeStart;
   const readLen = Math.min(rangeLen || 0, fileEnd - readStart);
-  return decryptFromFrames(blob, dataFrames, indexInfo.key, indexInfo.frameSalt, indexInfo, readStart, readLen);
+  return decryptFromFrames(
+    blob,
+    dataFrames,
+    indexInfo.key,
+    indexInfo.frameSalt,
+    indexInfo,
+    readStart,
+    readLen,
+  );
 }
 
 /**
  * 构建流式 ReadableStream 用于下载单个文件
  */
-export function buildDecodeStream(blob, indexInfo, dataFrames, fileIdx, chunkSizeKB) {
+export function buildDecodeStream(
+  blob,
+  indexInfo,
+  dataFrames,
+  fileIdx,
+  chunkSizeKB,
+) {
   const entry = indexInfo.entries[fileIdx];
   if (!entry) throw Error("文件索引无效: " + fileIdx);
 
@@ -292,7 +358,14 @@ export function buildDecodeStream(blob, indexInfo, dataFrames, fileIdx, chunkSiz
         let offset = 0;
         while (offset < fileSize && !job.cancelled) {
           const take = Math.min(CHUNK, fileSize - offset);
-          const chunk = await extractFileDataRange(blob, indexInfo, dataFrames, fileIdx, offset, take);
+          const chunk = await extractFileDataRange(
+            blob,
+            indexInfo,
+            dataFrames,
+            fileIdx,
+            offset,
+            take,
+          );
           if (job.cancelled || chunk.length === 0) break;
           controller.enqueue(chunk);
           offset += chunk.length;
@@ -302,7 +375,9 @@ export function buildDecodeStream(blob, indexInfo, dataFrames, fileIdx, chunkSiz
         controller.error(e);
       }
     },
-    cancel() { job.cancelled = true; },
+    cancel() {
+      job.cancelled = true;
+    },
   });
 
   return { stream, fileSize, fileName: entry.name, job };

@@ -1,10 +1,11 @@
 // 编码 Tab — 文件选择 + 分辨率设置 + 生成 AVI
+// 文件对象直接 postMessage 给 SW（File 跨进程传的是句柄，不传数据）
 "use strict";
 
 import { fmt, precomputeFrames } from "./f2v-core.js";
 import { clone } from "./template.js";
 import { swSend } from "./sw-client.js";
-import { showToast, getChunkSize } from "./ui-shell.js";
+import { showToast, getChunkSize, showTab } from "./ui-shell.js";
 import { addTask, updateTask } from "./task-manager.js";
 
 const encInput = document.getElementById("encInput");
@@ -13,22 +14,33 @@ const encPwd = document.getElementById("encPwdInput");
 const encBtn = document.getElementById("encBtn");
 const clearBtn = document.getElementById("clearBtn");
 const fileList = document.getElementById("fileList");
-const encWidth = document.getElementById("encWidth");
-const encHeight = document.getElementById("encHeight");
+const encResolution = document.getElementById("encResolution");
 const encFps = document.getElementById("encFps");
 const encInfo = document.getElementById("encInfo");
-
 let files = [];
 
 // ── 拖放 / 选择 ──
 
 encInput.addEventListener("change", () => addFiles(encInput.files));
-encDrop.addEventListener("dragover", (e) => { e.preventDefault(); encDrop.classList.add("drag-over"); });
-encDrop.addEventListener("dragleave", () => encDrop.classList.remove("drag-over"));
-encDrop.addEventListener("drop", (e) => { e.preventDefault(); encDrop.classList.remove("drag-over"); addFiles(e.dataTransfer.files); });
+encDrop.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  encDrop.classList.add("drag-over");
+});
+encDrop.addEventListener("dragleave", () =>
+  encDrop.classList.remove("drag-over"),
+);
+encDrop.addEventListener("drop", (e) => {
+  e.preventDefault();
+  encDrop.classList.remove("drag-over");
+  addFiles(e.dataTransfer.files);
+});
 
 function addFiles(newFiles) {
-  for (const f of newFiles) files.push(f);
+  for (const f of newFiles) {
+    // 按文件名去重
+    const dup = files.some((e) => e.name === f.name);
+    if (!dup) files.push(f);
+  }
   renderFileList();
   encBtn.disabled = files.length === 0;
   updateInfo();
@@ -42,7 +54,8 @@ function renderFileList() {
   if (files.length === 0) return;
 
   const container = clone("enc-file-container");
-  container.querySelector(".enc-file-summary").textContent = files.length + " 个文件，共 " + fmt(files.reduce((s, f) => s + f.size, 0));
+  container.querySelector(".enc-file-summary").textContent =
+    files.length + " 个文件，共 " + fmt(files.reduce((s, f) => s + f.size, 0));
   const body = container.querySelector(".enc-file-body");
   files.forEach((f, i) => {
     const item = clone("enc-file-item");
@@ -62,27 +75,39 @@ function renderFileList() {
 
 // ── 信息行 ──
 
+function getRes() {
+  const v = encResolution.value;
+  const parts = v.split("x");
+  return { w: parseInt(parts[0]) || 640, h: parseInt(parts[1]) || 320 };
+}
+
 function updateInfo() {
-  if (files.length === 0) { encInfo.textContent = ""; return; }
-  const w = parseInt(encWidth.value) || 1920;
-  const h = parseInt(encHeight.value) || 1080;
+  if (files.length === 0) {
+    encInfo.textContent = "";
+    return;
+  }
+  const { w, h } = getRes();
   try {
     const fi = precomputeFrames(files, w, h);
-    encInfo.textContent = fi.totalFrames + " 帧 · 输出大小 ≈ " + fmt(fi.totalFrames * (8 + 28 + fi.bytesPerFrame) + fi.totalFrames * 16);
+    encInfo.textContent =
+      fi.totalFrames +
+      " 帧 · 输出 ≈ " +
+      fmt(fi.totalFrames * (8 + 28 + fi.bytesPerFrame) + fi.totalFrames * 16);
   } catch (e) {
     encInfo.textContent = "⚠ " + e.message;
   }
 }
 
-[encWidth, encHeight, encFps].forEach((el) => el.addEventListener("change", updateInfo));
+[encResolution, encFps].forEach((el) =>
+  el.addEventListener("change", updateInfo),
+);
 
 // ── 生成 ──
 
 encBtn.addEventListener("click", async () => {
   if (files.length === 0) return;
   const pwd = encPwd.value;
-  const w = parseInt(encWidth.value) || 1920;
-  const h = parseInt(encHeight.value) || 1080;
+  const { w, h } = getRes();
   const fps = parseInt(encFps.value) || 30;
 
   let frameInfo;
@@ -93,26 +118,39 @@ encBtn.addEventListener("click", async () => {
     return;
   }
 
-  const jobId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const jobId =
+    Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   addTask(jobId, "encode", files.length + " 个文件 → AVI");
 
   const CHUNK = getChunkSize();
+
+  // File 对象 postMessage 传的是句柄，SW 侧直接 .slice() 流式读
   swSend({
     type: "f2v-encode",
     jobId,
-    files: files.map((f) => ({ name: f.name, size: f.size })),
+    files,
     password: pwd,
     w,
     h,
     fps,
     chunkSize: CHUNK,
-    frameInfo: { // send serializable precompute result
+    frameInfo: {
       totalFrames: frameInfo.totalFrames,
       fileListSize: frameInfo.fileListSize,
       fileTotalData: frameInfo.fileTotalData,
       frames: frameInfo.frames,
+      nameBufs: frameInfo.nameBufs,
+      bytesPerFrame: frameInfo.bytesPerFrame,
+      fileCount: frameInfo.fileCount,
     },
   });
+
+  // 清空文件列表并跳转到任务列表
+  files = [];
+  renderFileList();
+  encBtn.disabled = true;
+  encInfo.textContent = "";
+  showTab("tasks");
 });
 
 // ── 清空 ──
@@ -137,20 +175,30 @@ navigator.serviceWorker.addEventListener("message", (e) => {
       updateTask(msg.jobId, msg);
       break;
     case "job-done":
-      updateTask(msg.jobId, { progress: 100, status: "done", fileName: msg.fileName });
+      updateTask(msg.jobId, {
+        progress: 100,
+        status: "done",
+        fileName: msg.fileName,
+      });
       break;
+
     case "job-error":
       updateTask(msg.jobId, { status: "error", error: msg.error });
-      showToast("编码失败: " + msg.error);
+      showToast(
+        msg.kind === "decode"
+          ? "解码失败: " + msg.error
+          : "编码失败: " + msg.error,
+      );
       break;
     case "f2v-encode-ready":
-      // 触发下载
-      const a = document.createElement("a");
-      a.href = "/file/" + msg.hash + "/" + encodeURIComponent(msg.fileName);
-      a.download = msg.fileName;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
+      const dlUrl = "/files?id=" + msg.jobId;
+      const f = document.createElement("iframe");
+      f.style.display = "none";
+      document.body.appendChild(f);
+      f.src = dlUrl;
+      setTimeout(() => {
+        if (f.parentNode) f.remove();
+      }, 30000);
       showToast("下载: " + msg.fileName);
       break;
   }

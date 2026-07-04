@@ -13,12 +13,13 @@ export const F2V1 = 0x46325631; // "F2V1"
 // ── 帧头常量 ──
 
 export const FRAME0_HEADER_SIZE = 28; // magic(4) + encMagic(4) + frameSalt(16) + iter(4)
-export const BPP = 4;                 // 32-bit BGRA
+export const BPP = 4; // 32-bit BGRA
 export const ITER_DEFAULT = 10000;
 
 // ── AVI 常量 ──
 
 const AVIIF_KEYFRAME = 0x00000010;
+const AVIF_HASINDEX = 0x00000010;
 const AVIF_MUSTUSEINDEX = 0x00010000;
 
 // ═══════════════════════════════════════════════
@@ -50,7 +51,12 @@ export async function deriveEncKey(password, salt, iterations, extractable) {
     ["deriveKey"],
   );
   return crypto.subtle.deriveKey(
-    { name: "PBKDF2", salt, iterations: iterations || ITER_DEFAULT, hash: "SHA-256" },
+    {
+      name: "PBKDF2",
+      salt,
+      iterations: iterations || ITER_DEFAULT,
+      hash: "SHA-256",
+    },
     pwdKey,
     { name: "AES-CTR", length: 256 },
     !!extractable,
@@ -112,8 +118,12 @@ export async function aesDecrypt(data, key, counter, blockOff, bits) {
 // ═══════════════════════════════════════════════
 
 export async function readChunk(file, start, end, trySize) {
+  const TIMEOUT = 60000;
   try {
-    return new Uint8Array(await file.slice(start, end).arrayBuffer());
+    const blob = await file.slice(start, end);
+    // 用 arrayBuffer 一次性读完，避免 Blob.stream() 多 chunk 漏数据
+    const ab = await blob.arrayBuffer();
+    return new Uint8Array(ab);
   } catch {
     const half = Math.max(trySize >>> 1, 1024);
     if (half < trySize && start + half < end) {
@@ -137,7 +147,10 @@ export async function readFileDataRange(files, offset, length) {
   let remaining = length;
   for (const f of files) {
     if (remaining <= 0) break;
-    if (offset >= cum + f.size) { cum += f.size; continue; }
+    if (offset >= cum + f.size) {
+      cum += f.size;
+      continue;
+    }
     const fileStart = Math.max(0, offset - cum);
     const readLen = Math.min(f.size - fileStart, remaining);
     const buf = await readChunk(f, fileStart, fileStart + readLen, readLen);
@@ -151,7 +164,10 @@ export async function readFileDataRange(files, offset, length) {
   const total = parts.reduce((s, p) => s + p.length, 0);
   const result = new Uint8Array(total);
   let off = 0;
-  for (const p of parts) { result.set(p, off); off += p.length; }
+  for (const p of parts) {
+    result.set(p, off);
+    off += p.length;
+  }
   return result;
 }
 
@@ -161,24 +177,52 @@ export async function readFileDataRange(files, offset, length) {
 
 export function createWriter(push) {
   return {
+    w16(v) {
+      push(new Uint8Array([v & 0xff, (v >>> 8) & 0xff]));
+    },
     w32(v) {
-      push(new Uint8Array([v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff]));
+      push(
+        new Uint8Array([
+          v & 0xff,
+          (v >>> 8) & 0xff,
+          (v >>> 16) & 0xff,
+          (v >>> 24) & 0xff,
+        ]),
+      );
     },
     w32BE(v) {
-      push(new Uint8Array([(v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff]));
+      push(
+        new Uint8Array([
+          (v >>> 24) & 0xff,
+          (v >>> 16) & 0xff,
+          (v >>> 8) & 0xff,
+          v & 0xff,
+        ]),
+      );
     },
     w64BE(v) {
       const hi = Math.floor(v / 0x100000000) >>> 0;
       const lo = v >>> 0;
-      push(new Uint8Array([
-        (hi >>> 24) & 0xff, (hi >>> 16) & 0xff, (hi >>> 8) & 0xff, hi & 0xff,
-        (lo >>> 24) & 0xff, (lo >>> 16) & 0xff, (lo >>> 8) & 0xff, lo & 0xff,
-      ]));
+      push(
+        new Uint8Array([
+          (hi >>> 24) & 0xff,
+          (hi >>> 16) & 0xff,
+          (hi >>> 8) & 0xff,
+          hi & 0xff,
+          (lo >>> 24) & 0xff,
+          (lo >>> 16) & 0xff,
+          (lo >>> 8) & 0xff,
+          lo & 0xff,
+        ]),
+      );
     },
-    wBytes(arr) { push(arr); },
+    wBytes(arr) {
+      push(arr);
+    },
     wStr4(s) {
       const buf = new Uint8Array(4);
-      for (let i = 0; i < 4; i++) buf[i] = i < s.length ? s.charCodeAt(i) : 0x20;
+      for (let i = 0; i < 4; i++)
+        buf[i] = i < s.length ? s.charCodeAt(i) : 0x20;
       push(buf);
     },
     wPadZeros(n) {
@@ -208,31 +252,39 @@ export function precomputeFrames(files, w, h) {
   const bytesPerFrame = w * h * BPP;
 
   // 帧 0 纯元数据
-  const frame0EncData = 8 + fileListSize;  // fileCount + fileEntries
+  const frame0EncData = 8 + fileListSize; // fileCount + fileEntries
 
   // 元数据超限检查
   if (frame0EncData > bytesPerFrame - FRAME0_HEADER_SIZE) {
     throw new Error(
       "文件列表容量不足：至少需要 " +
-        fmt(frame0EncData + FRAME0_HEADER_SIZE) + " / 帧，当前 " +
-        fmt(bytesPerFrame) + " / 帧",
+        fmt(frame0EncData + FRAME0_HEADER_SIZE) +
+        " / 帧，当前 " +
+        fmt(bytesPerFrame) +
+        " / 帧",
     );
   }
 
   // 数据帧
   const dataPerFrame = bytesPerFrame;
-  const dataFrameCount = fileTotalData > 0 ? Math.ceil(fileTotalData / dataPerFrame) : 0;
+  const dataFrameCount =
+    fileTotalData > 0 ? Math.ceil(fileTotalData / dataPerFrame) : 0;
   const totalFrames = 1 + dataFrameCount;
 
   // 帧数据分配
   const frames = [];
+  let dataOff = 0;
+
   frames.push({
     frameID: 0,
     isMeta: true,
     encStart: FRAME0_HEADER_SIZE,
     dataSize: frame0EncData,
     chunkSize: 8 + FRAME0_HEADER_SIZE + frame0EncData,
+    dataOffset: 0,
   });
+  // 注意：帧 0 元数据不占用 file data 的 offset 空间
+  // dataOff 保持 0，后续数据帧从文件头开始读
 
   for (let i = 1; i < totalFrames; i++) {
     const rem = fileTotalData - (i - 1) * dataPerFrame;
@@ -243,7 +295,9 @@ export function precomputeFrames(files, w, h) {
       encStart: 0,
       dataSize: ds,
       chunkSize: 8 + ds,
+      dataOffset: dataOff,
     });
+    dataOff += ds;
   }
 
   return {
@@ -268,47 +322,87 @@ export function precomputeFrames(files, w, h) {
 export function buildAVIIndex(frameInfo, fps) {
   const { frames, totalFrames } = frameInfo;
 
-  // hdrl size
+  // avih
   const avihSize = 8 + 56;
-  const strhSize = 8 + 56;
+  const strhSize = 8 + 64; // strh data = 64B (12xDWORD + RECT 4xLONG)
   const strfSize = 8 + 40;
   const strlListSize = 8 + 4 + strhSize + strfSize;
   const hdrlListSize = 8 + 4 + avihSize + strlListSize;
 
-  // movi size
+  // movi size（含每帧 WORD 对齐填充）
   let moviDataSize = 0;
-  for (const f of frames) moviDataSize += f.chunkSize;
+  for (const f of frames) {
+    moviDataSize += f.chunkSize;
+    if (f.chunkSize % 2 !== 0) moviDataSize++; // WORD 对齐填充
+  }
   const moviListSize = 8 + 4 + moviDataSize;
 
   // indx size
-  const indxChunkSize = 8 + totalFrames * 16;
-  const indxSize = 8 + indxChunkSize;
+  const INDX_ENTRY_SIZE = 24;
+  const INDX_SUB_SIZE = 24;
+  const indxChunkSize = 8 + INDX_SUB_SIZE + totalFrames * INDX_ENTRY_SIZE;
+  const indxSize = indxChunkSize;
+
+  // idx1 size（AVI 1.0 旧格式，16B/entry）
+  const idx1Size = 8 + totalFrames * 16;
+
+  // RIFF WORD 对齐填充
+  const moviPad = moviDataSize % 2 !== 0; // movi LIST 数据为奇数时需要一个 0 填充字节
 
   // RIFF header: 'RIFF'(4) + size(4) + formType(4)
-  const riffDataSize = 4 + hdrlListSize + moviListSize + indxSize;
-  const totalFileSize = 12 + hdrlListSize + moviListSize + indxSize;
+  const riffDataSize =
+    4 + hdrlListSize + moviListSize + (moviPad ? 1 : 0) + idx1Size + indxSize;
+  const totalFileSize =
+    12 + hdrlListSize + moviListSize + (moviPad ? 1 : 0) + idx1Size + indxSize;
 
   // movi 数据区起始文件偏移
   const moviStart = 12 + hdrlListSize + 8 + 4; // RIFF + hdrl + LIST('movi') header
 
-  // 构建 indx 表
-  const indxBuf = new Uint8Array(indxChunkSize);
-  const v = new DataView(indxBuf.buffer);
-  v.setUint32(0, 0x696e6478, true); // 'indx'
-  v.setUint32(4, totalFrames * 16, true); // chunk size
+  // ── idx1（AVI 1.0 旧格式索引，兼容 VLC 等解析器） ──
+  const IDX1_ENTRY_SIZE = 16;
+  const idx1DataSize = totalFrames * IDX1_ENTRY_SIZE;
+  const idx1Buf = new Uint8Array(8 + idx1DataSize);
+  const i1 = new DataView(idx1Buf.buffer);
+  i1.setUint32(0, 0x31786469, true); // 'idx1'
+  i1.setUint32(4, idx1DataSize, true); // chunk data size
 
   let currOff = 0;
   for (let i = 0; i < totalFrames; i++) {
-    const base = 8 + i * 16;
-    v.setUint32(base, 0x30306462, true);   // chunk id '00db'
-    v.setUint32(base + 4, AVIIF_KEYFRAME, true); // flags
-    // 64-bit offset (movi-relative, little-endian)
+    const base = 8 + i * IDX1_ENTRY_SIZE;
+    i1.setUint32(base, 0x62643030, true); // dwChunkId '00db'
+    i1.setUint32(base + 4, AVIIF_KEYFRAME, true); // dwFlags
+    i1.setUint32(base + 8, currOff, true); // dwOffset（movi-relative）
+    i1.setUint32(base + 12, frames[i].chunkSize - 8, true); // dwSize = dataSize
+    currOff += frames[i].chunkSize;
+    if (frames[i].chunkSize % 2 !== 0) currOff++;
+  }
+
+  // ── indx（OpenDML AVISTDINDEX 格式） ──
+  const indxBuf = new Uint8Array(indxChunkSize);
+  const v = new DataView(indxBuf.buffer);
+  const RIFF_HEADER = 8;
+  const ENTRIES_OFF = RIFF_HEADER + INDX_SUB_SIZE;
+  const chunkDataSize = INDX_SUB_SIZE + totalFrames * INDX_ENTRY_SIZE;
+
+  v.setUint32(0, 0x78646e69, true); // 'indx'
+  v.setUint32(4, chunkDataSize, true);
+  v.setUint16(8, 6, true);
+  v.setUint8(10, 0);
+  v.setUint8(11, 0);
+  v.setUint32(12, totalFrames, true);
+  v.setUint32(16, 0x62643030, true);
+
+  currOff = 0;
+  for (let i = 0; i < totalFrames; i++) {
+    const base = ENTRIES_OFF + i * INDX_ENTRY_SIZE;
+    v.setUint32(base, 0x62643030, true);
+    v.setUint32(base + 4, AVIIF_KEYFRAME, true);
     v.setUint32(base + 8, currOff, true);
     v.setUint32(base + 12, 0, true);
-    // size + duration
-    v.setUint32(base + 16, frames[i].chunkSize, true);
-    v.setUint32(base + 20, 1, true); // duration
+    v.setUint32(base + 16, frames[i].chunkSize - 8, true);
+    v.setUint32(base + 20, 1, true);
     currOff += frames[i].chunkSize;
+    if (frames[i].chunkSize % 2 !== 0) currOff++;
   }
 
   return {
@@ -316,9 +410,12 @@ export function buildAVIIndex(frameInfo, fps) {
     moviStart,
     moviListSize,
     hdrlListSize,
+    idx1Buf,
+    idx1Size,
     indxBuf,
     indxSize,
     riffDataSize,
+    moviPad,
   };
 }
 
@@ -343,51 +440,60 @@ export function writeAVIHeader(push, aviIndex, w, h, fps, totalFrames) {
   // avih
   wtr.wStr4("avih");
   wtr.w32(56);
-  wtr.w32(Math.round(1000000 / fps));   // dwMicroSecPerFrame
-  wtr.w32(0);                           // dwMaxBytesPerSec
-  wtr.w32(0);                           // dwPaddingGranularity
-  wtr.w32(AVIF_MUSTUSEINDEX);           // dwFlags
-  wtr.w32(totalFrames);                 // dwTotalFrames
-  wtr.w32(0);                           // dwInitialFrames
-  wtr.w32(1);                           // dwStreams
-  wtr.w32(0);                           // dwSuggestedBufferSize
-  wtr.w32(w);                           // dwWidth
-  wtr.w32(h);                           // dwHeight
-  wtr.w32(0); wtr.w32(0); wtr.w32(0); wtr.w32(0); // reserved
+  wtr.w32(Math.round(1000000 / fps)); // dwMicroSecPerFrame
+  wtr.w32(0); // dwMaxBytesPerSec
+  wtr.w32(0); // dwPaddingGranularity
+  wtr.w32(AVIF_HASINDEX | AVIF_MUSTUSEINDEX); // dwFlags
+  wtr.w32(totalFrames); // dwTotalFrames
+  wtr.w32(0); // dwInitialFrames
+  wtr.w32(1); // dwStreams
+  wtr.w32(0); // dwSuggestedBufferSize
+  wtr.w32(w); // dwWidth
+  wtr.w32(h); // dwHeight
+  wtr.w32(0);
+  wtr.w32(0);
+  wtr.w32(0);
+  wtr.w32(0); // reserved
 
   // LIST strl
   wtr.wStr4("LIST");
-  wtr.w32(4 + 64 + 48);                // formType + strh(8+56) + strf(8+40)
+  wtr.w32(4 + 72 + 48); // formType + strh(8+64) + strf(8+40)
   wtr.wStr4("strl");
 
   // strh
   wtr.wStr4("strh");
-  wtr.w32(56);
-  wtr.wStr4("vids");                    // fccType
-  wtr.wStr4("F2V1");                    // fccHandler
-  wtr.w32(0); wtr.w32(0); wtr.w32(0);  // flags, priority, initialFrames
-  wtr.w32(1);                           // dwScale
-  wtr.w32(fps);                         // dwRate
-  wtr.w32(0);                           // dwStart
-  wtr.w32(totalFrames);                 // dwLength
-  wtr.w32(0);                           // dwSuggestedBufferSize
-  wtr.w32(-1);                          // dwQuality (-1 = default)
-  wtr.w32(0);                           // dwSampleSize
-  wtr.w16(0); wtr.w16(0);              // rcFrame left, top
-  wtr.w16(w); wtr.w16(h);              // rcFrame right, bottom
+  wtr.w32(64);
+  wtr.wStr4("vids"); // fccType
+  wtr.wStr4("F2V1"); // fccHandler
+  wtr.w32(0);
+  wtr.w32(0);
+  wtr.w32(0); // flags, priority, initialFrames
+  wtr.w32(1); // dwScale
+  wtr.w32(fps); // dwRate
+  wtr.w32(0); // dwStart
+  wtr.w32(totalFrames); // dwLength
+  wtr.w32(0); // dwSuggestedBufferSize
+  wtr.w32(-1); // dwQuality
+  wtr.w32(0); // dwSampleSize
+  wtr.w32(0);
+  wtr.w32(0); // rcFrame left, top (LONG)
+  wtr.w32(w);
+  wtr.w32(h); // rcFrame right, bottom (LONG)
 
   // strf (BITMAPINFOHEADER)
   wtr.wStr4("strf");
   wtr.w32(40);
-  wtr.w32(40);                          // biSize
-  wtr.w32(w);                           // biWidth
-  wtr.w32(h);                           // biHeight (top-down)
-  wtr.w16(1);                           // biPlanes
-  wtr.w16(32);                          // biBitCount
-  wtr.w32(0);                           // biCompression = BI_RGB
-  wtr.w32(w * h * BPP);                // biSizeImage
-  wtr.w32(0); wtr.w32(0);              // biXPelsPerMeter, biYPelsPerMeter
-  wtr.w32(0); wtr.w32(0);              // biClrUsed, biClrImportant
+  wtr.w32(40); // biSize
+  wtr.w32(w); // biWidth
+  wtr.w32(h); // biHeight (top-down)
+  wtr.w16(1); // biPlanes
+  wtr.w16(32); // biBitCount
+  wtr.w32(0); // biCompression = BI_RGB
+  wtr.w32(w * h * BPP); // biSizeImage
+  wtr.w32(0);
+  wtr.w32(0); // biXPelsPerMeter, biYPelsPerMeter
+  wtr.w32(0);
+  wtr.w32(0); // biClrUsed, biClrImportant
 
   // LIST movi
   wtr.wStr4("LIST");
@@ -407,6 +513,10 @@ export function writeChunkHeader(push, dataSize) {
 
 export function writeINDX(push, indxBuf) {
   push(indxBuf);
+}
+
+export function writeIDX1(push, idx1Buf) {
+  push(idx1Buf);
 }
 
 // ═══════════════════════════════════════════════
@@ -443,7 +553,9 @@ export function parseFileEntries(buf, startOff, fileCount) {
     if (off + 10 + nameLen > buf.length) break;
     let dataLen = 0;
     for (let j = 0; j < 8; j++) dataLen = (dataLen << 8) | buf[off + 2 + j];
-    const name = new TextDecoder().decode(buf.subarray(off + 10, off + 10 + nameLen));
+    const name = new TextDecoder().decode(
+      buf.subarray(off + 10, off + 10 + nameLen),
+    );
     entries.push({ name, size: dataLen });
     off += 10 + nameLen;
   }

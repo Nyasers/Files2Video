@@ -1,11 +1,10 @@
-// 解码 Tab — AVI 选择 + 文件提取
+// 解码 Tab — AVI 选择 + 文件提取（SW 流式解码）
 "use strict";
 
 import { fmt } from "./f2v-core.js";
 import { clone } from "./template.js";
 import { swSend } from "./sw-client.js";
 import { showToast } from "./ui-shell.js";
-import { addTask, updateTask } from "./task-manager.js";
 
 const decInput = document.getElementById("decInput");
 const decDrop = document.getElementById("decDrop");
@@ -16,9 +15,8 @@ const decFileList = document.getElementById("decFileList");
 const decText = document.getElementById("decText");
 const decHint = document.getElementById("decHint");
 
-let aviBlob = null;
-let entries = null;
-let jobId = null;
+let aviFile = null;
+let currentJobId = null;
 
 // ── 拖放 / 选择 ──
 
@@ -29,31 +27,30 @@ decDrop.addEventListener("drop", (e) => { e.preventDefault(); decDrop.classList.
 
 function handleFile(file) {
   if (!file) return;
-  aviBlob = file;
+  aviFile = file;
+  currentJobId = null;
   decText.textContent = file.name + " (" + fmt(file.size) + ")";
-  decHint.textContent = "分析中...";
+  decHint.textContent = "F2V1 格式";
   decBtn.disabled = false;
-  entries = null;
   decFileList.style.display = "none";
   decFileList.innerHTML = "";
 }
 
 // ── 提取 ──
 
-decBtn.addEventListener("click", async () => {
-  if (!aviBlob) return;
+decBtn.addEventListener("click", () => {
+  if (!aviFile) return;
   const pwd = decPwd.value;
   decBtn.disabled = true;
   decHint.textContent = "正在提取...";
 
-  jobId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-  addTask(jobId, "decode", aviBlob.name);
+  currentJobId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
+  // 把 AVI 文件发给 SW（File 可通过 structured clone 传输）
   swSend({
     type: "f2v-decode",
-    jobId,
-    fileName: aviBlob.name,
-    fileSize: aviBlob.size,
+    jobId: currentJobId,
+    file: aviFile,
     password: pwd,
   });
 });
@@ -61,8 +58,7 @@ decBtn.addEventListener("click", async () => {
 // ── 清空 ──
 
 decClearBtn.addEventListener("click", () => {
-  aviBlob = null;
-  entries = null;
+  aviFile = null; currentJobId = null;
   decInput.value = "";
   decText.textContent = "拖放 AVI 文件，或点击选择";
   decHint.textContent = "F2V1 格式的 AVI 文件";
@@ -71,18 +67,23 @@ decClearBtn.addEventListener("click", () => {
   decFileList.innerHTML = "";
 });
 
-// ── 单独下载 ──
+// ── 触发流式下载（走 /files 路由注册后 302 → /file/hash/name） ──
 
-function triggerDownload(jobId, idx) {
-  swSend({ type: "f2v-download", jobId, idx });
+function triggerDownload(idx) {
+  if (!currentJobId) return;
+  const dlUrl = "/files?id=" + currentJobId + "&idx=" + idx;
+  const f = document.createElement("iframe");
+  f.style.display = "none";
+  document.body.appendChild(f);
+  f.src = dlUrl;
+  setTimeout(() => { if (f.parentNode) f.remove(); }, 30000);
 }
 
 function batchDownload() {
-  if (!jobId) return;
   const cbs = decFileList.querySelectorAll(".dec-file-cb:checked");
   cbs.forEach((cb) => {
     const idx = parseInt(cb.dataset.idx);
-    if (!isNaN(idx)) triggerDownload(jobId, idx);
+    if (!isNaN(idx)) triggerDownload(idx);
   });
 }
 
@@ -91,35 +92,31 @@ function batchDownload() {
 navigator.serviceWorker.addEventListener("message", (e) => {
   const msg = e.data;
   if (!msg) return;
+
   switch (msg.type) {
     case "f2v-decode-result":
-      entries = msg.entries;
-      jobId = msg.jobId;
-      renderDecFileList();
-      decHint.textContent = entries.length + " 个文件";
+      if (msg.jobId !== currentJobId) return;
+      decHint.textContent = msg.entries.length + " 个文件";
+      renderDecFileList(msg.entries);
       decBtn.disabled = false;
       break;
-    case "job-new":
-      if (msg.kind === "decode") addTask(msg.jobId, "decode", msg.label);
-      break;
-    case "job-progress":
-      updateTask(msg.jobId, msg);
-      break;
-    case "job-done":
-      updateTask(msg.jobId, { progress: 100, status: "done" });
-      break;
+
+    // 下载走 /files 路由 302 重定向，不再通过消息传递
+
     case "job-error":
-      updateTask(msg.jobId, { status: "error", error: msg.error });
-      if (msg.jobId === jobId) {
-        decBtn.disabled = false;
+      if (msg.jobId === currentJobId) {
         decHint.textContent = "❌ " + msg.error;
+        decBtn.disabled = false;
+        showToast("解码失败: " + msg.error);
       }
       break;
   }
 });
 
-function renderDecFileList() {
-  if (!entries || !entries.length) return;
+// ── 渲染文件列表 ──
+
+function renderDecFileList(entries) {
+  if (!entries?.length) return;
   decFileList.style.display = "";
   decFileList.innerHTML = "";
 
@@ -127,7 +124,7 @@ function renderDecFileList() {
   container.querySelector(".dec-file-summary").textContent = entries.length + " 个文件";
   container.querySelector(".select-all-dec").addEventListener("change", (e) => {
     decFileList.querySelectorAll(".dec-file-cb").forEach((cb) => cb.checked = e.target.checked);
-    updateSelectedCount();
+    updateSelectedCount(entries);
   });
   container.querySelector(".btn-batch-dl").addEventListener("click", batchDownload);
 
@@ -137,15 +134,15 @@ function renderDecFileList() {
     item.querySelector(".dec-file-cb").dataset.idx = i;
     item.querySelector(".name").textContent = e.name;
     item.querySelector(".size").textContent = fmt(e.size);
-    item.querySelector(".dl-btn").addEventListener("click", () => triggerDownload(jobId, i));
+    item.querySelector(".dl-btn").addEventListener("click", () => triggerDownload(i));
     body.appendChild(item);
   });
 
   decFileList.appendChild(container);
-  updateSelectedCount();
+  updateSelectedCount(entries);
 }
 
-function updateSelectedCount() {
+function updateSelectedCount(entries) {
   const checked = decFileList.querySelectorAll(".dec-file-cb:checked").length;
   const el = decFileList.querySelector(".dec-selected-count");
   if (el) el.textContent = "已选 " + checked + " / " + (entries?.length || 0);
