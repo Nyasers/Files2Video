@@ -3,7 +3,7 @@
 
 import { fmt } from "./f2v-core.js";
 import { clone } from "./template.js";
-import { swSend } from "./sw-client.js";
+import { swSend, onSWMessage } from "./sw-client.js";
 import { showToast } from "./ui-shell.js";
 
 const decInput = document.getElementById("decInput");
@@ -21,9 +21,18 @@ let currentJobId = null;
 // ── 拖放 / 选择 ──
 
 decInput.addEventListener("change", () => handleFile(decInput.files[0]));
-decDrop.addEventListener("dragover", (e) => { e.preventDefault(); decDrop.classList.add("drag-over"); });
-decDrop.addEventListener("dragleave", () => decDrop.classList.remove("drag-over"));
-decDrop.addEventListener("drop", (e) => { e.preventDefault(); decDrop.classList.remove("drag-over"); handleFile(e.dataTransfer.files[0]); });
+decDrop.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  decDrop.classList.add("drag-over");
+});
+decDrop.addEventListener("dragleave", () =>
+  decDrop.classList.remove("drag-over"),
+);
+decDrop.addEventListener("drop", (e) => {
+  e.preventDefault();
+  decDrop.classList.remove("drag-over");
+  handleFile(e.dataTransfer.files[0]);
+});
 
 function handleFile(file) {
   if (!file) return;
@@ -44,9 +53,9 @@ decBtn.addEventListener("click", () => {
   decBtn.disabled = true;
   decHint.textContent = "正在提取...";
 
-  currentJobId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  currentJobId =
+    Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
-  // 把 AVI 文件发给 SW（File 可通过 structured clone 传输）
   swSend({
     type: "f2v-decode",
     jobId: currentJobId,
@@ -58,7 +67,8 @@ decBtn.addEventListener("click", () => {
 // ── 清空 ──
 
 decClearBtn.addEventListener("click", () => {
-  aviFile = null; currentJobId = null;
+  aviFile = null;
+  currentJobId = null;
   decInput.value = "";
   decText.textContent = "拖放 AVI 文件，或点击选择";
   decHint.textContent = "F2V1 格式的 AVI 文件";
@@ -76,7 +86,9 @@ function triggerDownload(idx) {
   f.style.display = "none";
   document.body.appendChild(f);
   f.src = dlUrl;
-  setTimeout(() => { if (f.parentNode) f.remove(); }, 30000);
+  setTimeout(() => {
+    if (f.parentNode) f.remove();
+  }, 30000);
 }
 
 function batchDownload() {
@@ -89,27 +101,18 @@ function batchDownload() {
 
 // ── SW 消息 ──
 
-navigator.serviceWorker.addEventListener("message", (e) => {
-  const msg = e.data;
-  if (!msg) return;
+onSWMessage("f2v-decode-result", (msg) => {
+  if (msg.jobId !== currentJobId) return;
+  decHint.textContent = msg.entries.length + " 个文件";
+  renderDecFileList(msg.entries);
+  decBtn.disabled = false;
+});
 
-  switch (msg.type) {
-    case "f2v-decode-result":
-      if (msg.jobId !== currentJobId) return;
-      decHint.textContent = msg.entries.length + " 个文件";
-      renderDecFileList(msg.entries);
-      decBtn.disabled = false;
-      break;
-
-    // 下载走 /files 路由 302 重定向，不再通过消息传递
-
-    case "job-error":
-      if (msg.jobId === currentJobId) {
-        decHint.textContent = "❌ " + msg.error;
-        decBtn.disabled = false;
-        showToast("解码失败: " + msg.error);
-      }
-      break;
+onSWMessage("job-error", (msg) => {
+  if (msg.jobId === currentJobId) {
+    decHint.textContent = "❌ " + msg.error;
+    decBtn.disabled = false;
+    showToast("解码失败: " + msg.error);
   }
 });
 
@@ -121,12 +124,17 @@ function renderDecFileList(entries) {
   decFileList.innerHTML = "";
 
   const container = clone("dec-file-container");
-  container.querySelector(".dec-file-summary").textContent = entries.length + " 个文件";
+  container.querySelector(".dec-file-summary").textContent =
+    entries.length + " 个文件";
   container.querySelector(".select-all-dec").addEventListener("change", (e) => {
-    decFileList.querySelectorAll(".dec-file-cb").forEach((cb) => cb.checked = e.target.checked);
+    decFileList
+      .querySelectorAll(".dec-file-cb")
+      .forEach((cb) => (cb.checked = e.target.checked));
     updateSelectedCount(entries);
   });
-  container.querySelector(".btn-batch-dl").addEventListener("click", batchDownload);
+  container
+    .querySelector(".btn-batch-dl")
+    .addEventListener("click", batchDownload);
 
   const body = container.querySelector(".dec-file-body");
   entries.forEach((e, i) => {
@@ -134,7 +142,9 @@ function renderDecFileList(entries) {
     item.querySelector(".dec-file-cb").dataset.idx = i;
     item.querySelector(".name").textContent = e.name;
     item.querySelector(".size").textContent = fmt(e.size);
-    item.querySelector(".dl-btn").addEventListener("click", () => triggerDownload(i));
+    item
+      .querySelector(".dl-btn")
+      .addEventListener("click", () => triggerDownload(i));
     body.appendChild(item);
   });
 

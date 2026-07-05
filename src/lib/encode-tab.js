@@ -6,7 +6,6 @@ import { fmt, precomputeFrames } from "./f2v-core.js";
 import { clone } from "./template.js";
 import { swSend } from "./sw-client.js";
 import { showToast, getChunkSize, showTab } from "./ui-shell.js";
-import { addTask, updateTask } from "./task-manager.js";
 
 const encInput = document.getElementById("encInput");
 const encDrop = document.getElementById("encDrop");
@@ -17,6 +16,7 @@ const fileList = document.getElementById("fileList");
 const encResolution = document.getElementById("encResolution");
 const encFps = document.getElementById("encFps");
 const encInfo = document.getElementById("encInfo");
+
 let files = [];
 
 // ── 拖放 / 选择 ──
@@ -54,8 +54,15 @@ function renderFileList() {
   if (files.length === 0) return;
 
   const container = clone("enc-file-container");
-  container.querySelector(".enc-file-summary").textContent =
-    files.length + " 个文件，共 " + fmt(files.reduce((s, f) => s + f.size, 0));
+  let summary = "共 " + files.length + " 个文件";
+  try {
+    const { w, h } = getRes();
+    const fi = precomputeFrames(files, w, h);
+    summary += " · " + fmt(fi.fileTotalData) + " · " + fi.totalFrames + " 帧";
+  } catch (e) {
+    summary += " · " + fmt(files.reduce((s, f) => s + f.size, 0));
+  }
+  container.querySelector(".enc-file-summary").textContent = summary;
   const body = container.querySelector(".enc-file-body");
   files.forEach((f, i) => {
     const item = clone("enc-file-item");
@@ -82,20 +89,8 @@ function getRes() {
 }
 
 function updateInfo() {
-  if (files.length === 0) {
-    encInfo.textContent = "";
-    return;
-  }
-  const { w, h } = getRes();
-  try {
-    const fi = precomputeFrames(files, w, h);
-    encInfo.textContent =
-      fi.totalFrames +
-      " 帧 · 输出 ≈ " +
-      fmt(fi.totalFrames * (8 + 28 + fi.bytesPerFrame) + fi.totalFrames * 16);
-  } catch (e) {
-    encInfo.textContent = "⚠ " + e.message;
-  }
+  // 信息已整合到文件列表头部，encInfo 留空
+  encInfo.textContent = "";
 }
 
 [encResolution, encFps].forEach((el) =>
@@ -120,11 +115,8 @@ encBtn.addEventListener("click", async () => {
 
   const jobId =
     Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-  addTask(jobId, "encode", files.length + " 个文件 → AVI");
-
   const CHUNK = getChunkSize();
 
-  // File 对象 postMessage 传的是句柄，SW 侧直接 .slice() 流式读
   swSend({
     type: "f2v-encode",
     jobId,
@@ -162,44 +154,18 @@ clearBtn.addEventListener("click", () => {
   encInfo.textContent = "";
 });
 
-// ── SW 消息 ──
+// ── SW 消息（仅处理 f2v-encode-ready 下载触发器） ──
 
-navigator.serviceWorker.addEventListener("message", (e) => {
-  const msg = e.data;
-  if (!msg) return;
-  switch (msg.type) {
-    case "job-new":
-      if (msg.kind === "encode") addTask(msg.jobId, "encode", msg.label);
-      break;
-    case "job-progress":
-      updateTask(msg.jobId, msg);
-      break;
-    case "job-done":
-      updateTask(msg.jobId, {
-        progress: 100,
-        status: "done",
-        fileName: msg.fileName,
-      });
-      break;
+import { onSWMessage } from "./sw-client.js";
 
-    case "job-error":
-      updateTask(msg.jobId, { status: "error", error: msg.error });
-      showToast(
-        msg.kind === "decode"
-          ? "解码失败: " + msg.error
-          : "编码失败: " + msg.error,
-      );
-      break;
-    case "f2v-encode-ready":
-      const dlUrl = "/files?id=" + msg.jobId;
-      const f = document.createElement("iframe");
-      f.style.display = "none";
-      document.body.appendChild(f);
-      f.src = dlUrl;
-      setTimeout(() => {
-        if (f.parentNode) f.remove();
-      }, 30000);
-      showToast("下载: " + msg.fileName);
-      break;
-  }
+onSWMessage("f2v-encode-ready", (msg) => {
+  const dlUrl = "/files?id=" + msg.jobId;
+  const f = document.createElement("iframe");
+  f.style.display = "none";
+  document.body.appendChild(f);
+  f.src = dlUrl;
+  setTimeout(() => {
+    if (f.parentNode) f.remove();
+  }, 30000);
+  showToast("下载: " + msg.fileName);
 });

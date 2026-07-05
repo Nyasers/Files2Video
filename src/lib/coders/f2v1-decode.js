@@ -104,6 +104,49 @@ export async function parseAVI(blob) {
                 w = sfv.getUint32(4, true);
                 h = sfv.getUint32(8, true);
                 off += scsz;
+              } else if (scid === 0x78646e69) {
+                // 'indx' inside strl — Super Index
+                const subHdr = await readBlob(blob, off, 24);
+                const shv = new DataView(subHdr.buffer);
+                const bIT = shv.getUint8(3); // bIndexType
+                if (bIT === 0) {
+                  // AVI_INDEX_OF_INDEXES — read first entry
+                  const entry = await readBlob(blob, off + 24, 16);
+                  const ev = new DataView(entry.buffer);
+                  const qwLo = ev.getUint32(0, true);
+                  const qwHi = ev.getUint32(4, true);
+                  const ix00Off = Number(BigInt(qwLo) | (BigInt(qwHi) << 32n));
+                  // Read ix00 at ix00Off
+                  const ixHdr = await readBlob(blob, ix00Off, 8);
+                  if (ixHdr.length >= 8) {
+                    const ixId = new DataView(ixHdr.buffer).getUint32(0, true);
+                    const ixSz = new DataView(ixHdr.buffer).getUint32(4, true);
+                    if (ixId === 0x30307869) {
+                      // 'ix00'
+                      const entryCount = Math.floor((ixSz - 24) / 8);
+                      const baseBuf = await readBlob(blob, ix00Off + 8 + 12, 8);
+                      const baseOff = Number(
+                        new DataView(baseBuf.buffer).getBigUint64(0, true),
+                      );
+                      const idxBuf = await readBlob(
+                        blob,
+                        ix00Off + 8 + 24,
+                        entryCount * 8,
+                      );
+                      const iv = new DataView(idxBuf.buffer);
+                      for (let i = 0; i < entryCount; i++) {
+                        const foff = iv.getUint32(i * 8, true);
+                        const dsz = iv.getUint32(i * 8 + 4, true) & 0x7fffffff;
+                        rawFrames.push({
+                          frameID: i,
+                          absOffset: baseOff + foff,
+                          size: dsz + 8,
+                        });
+                      }
+                    }
+                  }
+                }
+                off += scsz;
               } else {
                 off += scsz;
               }
@@ -134,7 +177,11 @@ export async function parseAVI(blob) {
         const base = i * 24;
         const foff = iv.getUint32(base + 8, true); // movi-relative
         const dsz = iv.getUint32(base + 16, true); // dataSize（不含 chunk header）
-        rawFrames.push({ frameID: i, absOffset: moviStart + foff, size: dsz + 8 }); // 转为 chunkSize
+        rawFrames.push({
+          frameID: i,
+          absOffset: moviStart + foff,
+          size: dsz + 8,
+        }); // 转为 chunkSize
       }
       off += size;
     } else {

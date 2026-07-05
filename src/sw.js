@@ -20,7 +20,6 @@ import {
   writeAVIHeader,
   writeChunkHeader,
   writeINDX,
-  writeIDX1,
   FRAME0_HEADER_SIZE,
 } from "./lib/f2v-core.js";
 import {
@@ -132,6 +131,10 @@ async function syncUpdate(manifest) {
     ),
   );
   await bulkSetHashes(manifest);
+
+  self.clients.matchAll().then((cs) => {
+    for (const c of cs) c.postMessage({ type: "sw-updated" });
+  });
 }
 
 async function cleanupOrphans() {
@@ -192,6 +195,9 @@ self.addEventListener("message", (event) => {
       break;
     case "f2v-decode":
       event.waitUntil(handleDecode(event, msg));
+      break;
+    case "list-jobs":
+      listJobs(event);
       break;
   }
 });
@@ -337,8 +343,7 @@ async function handleEncode(event, msg) {
           }
 
           if (aviIndex.moviPad) push(new Uint8Array([0]));
-          writeIDX1(push, aviIndex.idx1Buf);
-          writeINDX(push, aviIndex.indxBuf);
+          writeINDX(push, aviIndex.ix00Buf);
           closeStream();
           job.status = "done";
           const doneMsg = { type: "job-done", jobId };
@@ -421,6 +426,26 @@ async function handleDecode(event, msg) {
       kind: "decode",
     });
   }
+}
+
+// ═══════════════════════════════════════════════
+// 任务列表查询
+// ═══════════════════════════════════════════════
+
+function listJobs(event) {
+  const list = [];
+  for (const [jobId, job] of encodeJobs) {
+    list.push({
+      jobId,
+      kind: "encode",
+      status: job.status,
+      progress: job.progress || 0,
+      label: job.label || "",
+    });
+  }
+  const msg = { type: "jobs-list", jobs: list };
+  if (event.source) event.source.postMessage(msg);
+  else postMsg(null, msg);
 }
 
 // ═══════════════════════════════════════════════

@@ -24,7 +24,6 @@ import {
   writeAVIHeader,
   writeChunkHeader,
   writeINDX,
-  writeIDX1,
   buildFileEntries,
   FRAME0_HEADER_SIZE,
   F2V1,
@@ -278,9 +277,8 @@ export function buildF2VStream(frameInfo, files, password, w, h, fps, opts) {
         // ── RIFF WORD 对齐填充 ──
         if (aviIndex.moviPad) push(new Uint8Array([0]));
 
-        // ── idx1 + indx ──
-        writeIDX1(push, aviIndex.idx1Buf);
-        writeINDX(push, aviIndex.indxBuf);
+        // ── ix00（Standard Index） ──
+        writeINDX(push, aviIndex.ix00Buf);
 
         closeStream();
         opts?.onProgress?.(1);

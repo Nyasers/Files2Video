@@ -326,94 +326,108 @@ export function buildAVIIndex(frameInfo, fps) {
   const avihSize = 8 + 56;
   const strhSize = 8 + 64; // strh data = 64B (12xDWORD + RECT 4xLONG)
   const strfSize = 8 + 40;
-  const strlListSize = 8 + 4 + strhSize + strfSize;
-  const hdrlListSize = 8 + 4 + avihSize + strlListSize;
+  const dmlhSize = 8 + 4; // 'dmlh' + size + dwTotalFrames
+  const superIndxSize = 8 + 24 + 1 * 16; // RIFF header + sub-header + 1 entry
+  const strlListSize = 8 + 4 + strhSize + strfSize + superIndxSize;
+  const hdrlListSize = 8 + 4 + avihSize + dmlhSize + strlListSize;
 
-  // movi size（含每帧 WORD 对齐填充）
-  let moviDataSize = 0;
+  // 帧数据大小（含每帧 WORD 对齐填充）
+  let frameDataSize = 0;
   for (const f of frames) {
-    moviDataSize += f.chunkSize;
-    if (f.chunkSize % 2 !== 0) moviDataSize++; // WORD 对齐填充
+    frameDataSize += f.chunkSize;
+    if (f.chunkSize % 2 !== 0) frameDataSize++;
   }
+
+  // ix00（Standard Index：sub-header 24B + 8B/entry，放在 movi 内）
+  const STD_SUB_SIZE = 24;
+  const STD_ENTRY_SIZE = 8;
+  const stdChunkDataSize = STD_SUB_SIZE + totalFrames * STD_ENTRY_SIZE;
+  const stdIndxSize = 8 + stdChunkDataSize;
+
+  // movi size = 帧数据 + WORD 对齐 + ix00 索引（均在 movi LIST 内）
+  const moviPad = frameDataSize % 2 !== 0;
+  const moviDataSize = frameDataSize + (moviPad ? 1 : 0) + stdIndxSize;
   const moviListSize = 8 + 4 + moviDataSize;
 
-  // indx size
-  const INDX_ENTRY_SIZE = 24;
-  const INDX_SUB_SIZE = 24;
-  const indxChunkSize = 8 + INDX_SUB_SIZE + totalFrames * INDX_ENTRY_SIZE;
-  const indxSize = indxChunkSize;
+  // RIFF header
+  const riffDataSize = 4 + hdrlListSize + moviListSize;
+  const totalFileSize = 12 + hdrlListSize + moviListSize;
 
-  // idx1 size（AVI 1.0 旧格式，16B/entry）
-  const idx1Size = 8 + totalFrames * 16;
+  // movi 数据区起始偏移
+  const moviStart = 12 + hdrlListSize + 8 + 4;
 
-  // RIFF WORD 对齐填充
-  const moviPad = moviDataSize % 2 !== 0; // movi LIST 数据为奇数时需要一个 0 填充字节
-
-  // RIFF header: 'RIFF'(4) + size(4) + formType(4)
-  const riffDataSize =
-    4 + hdrlListSize + moviListSize + (moviPad ? 1 : 0) + idx1Size + indxSize;
-  const totalFileSize =
-    12 + hdrlListSize + moviListSize + (moviPad ? 1 : 0) + idx1Size + indxSize;
-
-  // movi 数据区起始文件偏移
-  const moviStart = 12 + hdrlListSize + 8 + 4; // RIFF + hdrl + LIST('movi') header
-
-  // ── idx1（AVI 1.0 旧格式索引，兼容 VLC 等解析器） ──
-  const IDX1_ENTRY_SIZE = 16;
-  const idx1DataSize = totalFrames * IDX1_ENTRY_SIZE;
-  const idx1Buf = new Uint8Array(8 + idx1DataSize);
-  const i1 = new DataView(idx1Buf.buffer);
-  i1.setUint32(0, 0x31786469, true); // 'idx1'
-  i1.setUint32(4, idx1DataSize, true); // chunk data size
-
+  // 累计帧偏移
   let currOff = 0;
+  const frameOffsets = [];
   for (let i = 0; i < totalFrames; i++) {
-    const base = 8 + i * IDX1_ENTRY_SIZE;
-    i1.setUint32(base, 0x62643030, true); // dwChunkId '00db'
-    i1.setUint32(base + 4, AVIIF_KEYFRAME, true); // dwFlags
-    i1.setUint32(base + 8, currOff, true); // dwOffset（movi-relative）
-    i1.setUint32(base + 12, frames[i].chunkSize - 8, true); // dwSize = dataSize
+    frameOffsets.push(currOff);
     currOff += frames[i].chunkSize;
     if (frames[i].chunkSize % 2 !== 0) currOff++;
   }
 
-  // ── indx（OpenDML AVISTDINDEX 格式） ──
-  const indxBuf = new Uint8Array(indxChunkSize);
-  const v = new DataView(indxBuf.buffer);
-  const RIFF_HEADER = 8;
-  const ENTRIES_OFF = RIFF_HEADER + INDX_SUB_SIZE;
-  const chunkDataSize = INDX_SUB_SIZE + totalFrames * INDX_ENTRY_SIZE;
-
-  v.setUint32(0, 0x78646e69, true); // 'indx'
-  v.setUint32(4, chunkDataSize, true);
-  v.setUint16(8, 6, true);
-  v.setUint8(10, 0);
-  v.setUint8(11, 0);
-  v.setUint32(12, totalFrames, true);
-  v.setUint32(16, 0x62643030, true);
-
-  currOff = 0;
+  // ── ix00（Standard Index，放在 movi 尾部） ──
+  const ix00Buf = new Uint8Array(8 + stdChunkDataSize);
+  const ix = new DataView(ix00Buf.buffer);
+  ix.setUint32(0, 0x30307869, true); // 'ix00'
+  ix.setUint32(4, stdChunkDataSize, true);
+  ix.setUint16(8, 2, true); // wLongsPerEntry = 2
+  ix.setUint8(10, 0); // bIndexSubType
+  ix.setUint8(11, 1); // bIndexType = AVI_INDEX_OF_CHUNKS
+  ix.setUint32(12, totalFrames, true); // nEntriesInUse
+  ix.setUint32(16, 0x62643030, true); // dwChunkId = '00db'
+  // qwBaseOffset = moviStart（绝对文件偏移）
+  const baseHi = Math.floor(moviStart / 0x100000000) >>> 0;
+  const baseLo = moviStart >>> 0;
+  ix.setUint32(20, baseLo, true); // qwBaseOffset low
+  ix.setUint32(24, baseHi, true); // qwBaseOffset high
+  ix.setUint32(28, 0, true); // dwReserved3
+  // entries
   for (let i = 0; i < totalFrames; i++) {
-    const base = ENTRIES_OFF + i * INDX_ENTRY_SIZE;
-    v.setUint32(base, 0x62643030, true);
-    v.setUint32(base + 4, AVIIF_KEYFRAME, true);
-    v.setUint32(base + 8, currOff, true);
-    v.setUint32(base + 12, 0, true);
-    v.setUint32(base + 16, frames[i].chunkSize - 8, true);
-    v.setUint32(base + 20, 1, true);
-    currOff += frames[i].chunkSize;
-    if (frames[i].chunkSize % 2 !== 0) currOff++;
+    const base = 32 + i * STD_ENTRY_SIZE;
+    ix.setUint32(base, frameOffsets[i], true); // dwOffset（相对 qwBaseOffset）
+    ix.setUint32(base + 4, frames[i].chunkSize - 8, true); // dwSize = dataSize
   }
+
+  // ── dmlh（OpenDML 扩展头） ──
+  const dmlhBuf = new Uint8Array(12);
+  const dm = new DataView(dmlhBuf.buffer);
+  dm.setUint32(0, 0x686c6d64, true); // 'dmlh'
+  dm.setUint32(4, 4, true);
+  dm.setUint32(8, totalFrames, true);
+
+  // ── Super Index（AVI_INDEX_OF_INDEXES，放 strl 内） ──
+  // ix00 在 movi 内部：帧数据之后 + WORD 对齐之后
+  const ix00Off = moviStart + frameDataSize + (moviPad ? 1 : 0);
+  const SUP_SUB_SIZE = 24;
+  const SUP_ENTRY_SIZE = 16;
+  const supDataSize = SUP_SUB_SIZE + 1 * SUP_ENTRY_SIZE;
+  const superIndxBuf = new Uint8Array(8 + supDataSize);
+  const si = new DataView(superIndxBuf.buffer);
+  si.setUint32(0, 0x78646e69, true); // 'indx'
+  si.setUint32(4, supDataSize, true);
+  si.setUint16(8, 4, true); // wLongsPerEntry = 4
+  si.setUint8(10, 0); // bIndexSubType
+  si.setUint8(11, 0); // bIndexType = AVI_INDEX_OF_INDEXES
+  si.setUint32(12, 1, true); // nEntriesInUse = 1
+  si.setUint32(16, 0x62643030, true); // dwChunkId = '00db'
+  // dwReserved[3] 默认 0
+  // entry: qwOffset + dwSize + dwDuration
+  const hi = Math.floor(ix00Off / 0x100000000) >>> 0;
+  const lo = ix00Off >>> 0;
+  si.setUint32(32, lo, true); // qwOffset low
+  si.setUint32(36, hi, true); // qwOffset high
+  si.setUint32(40, stdIndxSize, true); // ix00 chunk size
+  si.setUint32(44, totalFrames, true); // dwDuration
 
   return {
     totalFileSize,
     moviStart,
     moviListSize,
     hdrlListSize,
-    idx1Buf,
-    idx1Size,
-    indxBuf,
-    indxSize,
+    ix00Buf,
+    stdIndxSize,
+    dmlhBuf,
+    superIndxBuf,
     riffDataSize,
     moviPad,
   };
@@ -455,16 +469,20 @@ export function writeAVIHeader(push, aviIndex, w, h, fps, totalFrames) {
   wtr.w32(0);
   wtr.w32(0); // reserved
 
+  // dmlh（OpenDML 扩展头）
+  wtr.wBytes(aviIndex.dmlhBuf);
+
   // LIST strl
+  const strlDataSize = 4 + 72 + 48 + aviIndex.superIndxBuf.length;
   wtr.wStr4("LIST");
-  wtr.w32(4 + 72 + 48); // formType + strh(8+64) + strf(8+40)
+  wtr.w32(strlDataSize);
   wtr.wStr4("strl");
 
   // strh
   wtr.wStr4("strh");
   wtr.w32(64);
   wtr.wStr4("vids"); // fccType
-  wtr.wStr4("F2V1"); // fccHandler
+  wtr.w32(0); // fccHandler = 0（未压缩，与 BI_RGB 一致，避免 WMP 找解码器）
   wtr.w32(0);
   wtr.w32(0);
   wtr.w32(0); // flags, priority, initialFrames
@@ -495,6 +513,9 @@ export function writeAVIHeader(push, aviIndex, w, h, fps, totalFrames) {
   wtr.w32(0);
   wtr.w32(0); // biClrUsed, biClrImportant
 
+  // Super Index（在 strl 内）
+  wtr.wBytes(aviIndex.superIndxBuf);
+
   // LIST movi
   wtr.wStr4("LIST");
   wtr.w32(moviListSize - 8);
@@ -513,10 +534,6 @@ export function writeChunkHeader(push, dataSize) {
 
 export function writeINDX(push, indxBuf) {
   push(indxBuf);
-}
-
-export function writeIDX1(push, idx1Buf) {
-  push(idx1Buf);
 }
 
 // ═══════════════════════════════════════════════
