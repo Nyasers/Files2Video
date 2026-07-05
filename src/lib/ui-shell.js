@@ -1,7 +1,6 @@
-// UI 外壳 — Tab 切换 + Toast + Chunk Size + SW 状态
+// UI 外壳 — Tab 切换 + Chunk Size + SW 状态
 "use strict";
-
-const $ = (id) => document.getElementById(id);
+import { $, toast } from "./sw-client.js";
 
 const sections = {
   enc: $("encSection"),
@@ -28,23 +27,7 @@ tabs.tasks.addEventListener("click", () => showTab("tasks"));
 
 // ── Toast ──
 
-let toasts = [];
-
-export function showToast(msg, dur) {
-  const c = $("toastContainer");
-  if (!c) return;
-  const el = document.createElement("div");
-  el.className = "toast";
-  el.textContent = msg;
-  c.appendChild(el);
-  toasts.push(el);
-  setTimeout(() => {
-    el.classList.add("out");
-    setTimeout(() => {
-      el.remove();
-    }, 250);
-  }, dur || 3000);
-}
+export const showToast = toast;
 
 // ── SW 状态（DOM 引用缓存，避免重复查询） ──
 

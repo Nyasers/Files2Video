@@ -38,11 +38,12 @@ import {
 const CACHE_NAME = "f2v-v1";
 const DB_NAME = "f2v-cache";
 const STORE_NAME = "hashes";
+const DB_VERSION = 1;
 const MANIFEST_URL = "/hashes.json";
 
 async function openDB() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1);
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       if (!req.result.objectStoreNames.contains(STORE_NAME))
         req.result.createObjectStore(STORE_NAME, { keyPath: "key" });
@@ -72,18 +73,51 @@ async function bulkSetHashes(manifest) {
     const store = tx.objectStore(STORE_NAME);
     store.clear();
     Object.entries(manifest).forEach(([key, hash]) => store.put({ key, hash }));
-    tx.oncomplete = () => resolve();
+    tx.oncomplete = () => {
+      cachedPaths = new Map(Object.entries(manifest));
+      resolve();
+    };
     tx.onerror = () => reject(tx.error);
   });
 }
 
 let cachedPaths = new Map();
 getAllHashes().then(
-  (h) => {
-    cachedPaths = new Map(Object.entries(h));
+  (hashes) => {
+    cachedPaths = new Map(Object.entries(hashes));
   },
   () => {},
 );
+
+// ── workOnce: 相同 key 的并发请求合并 ──
+
+function workOnce(key, task) {
+  const inflight = (workOnce.p ??= new Map());
+  return (
+    inflight.get(key) ??
+    inflight
+      .set(
+        key,
+        Promise.resolve(task?.()).then(
+          (v) => (inflight.delete(key), v),
+          (e) => (inflight.delete(key), Promise.reject(e)),
+        ),
+      )
+      .get(key)
+  );
+}
+
+// ── fetch 超时保护（AbortController）──
+
+const FETCH_TIMEOUT = 10000;
+
+function fetchWithTimeout(url, ms) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms || FETCH_TIMEOUT);
+  return fetch(url === "/index.html" ? "/" : url, {
+    signal: controller.signal,
+  }).finally(() => clearTimeout(timer));
+}
 
 function resolvePath(pn) {
   return pn === "/" ? "/index.html" : pn;
@@ -92,18 +126,22 @@ function resolvePath(pn) {
 // ── 60s promise 缓存：短时间多次导航不重复拉 manifest ──
 
 async function syncManifest() {
-  return (syncManifest.promise ??= fetch(MANIFEST_URL)
+  return (syncManifest.promise ??= fetchWithTimeout(MANIFEST_URL)
     .then((r) => r.json())
     .then((raw) => {
       const m = {};
       for (const [key, hash] of Object.entries(raw)) m["/" + key] = hash;
       return m;
     })
-    .then((manifest) => syncUpdate(manifest).then(() => manifest))
-    .then((manifest) => cleanupOrphans().then(() => manifest))
+    .then((manifest) =>
+      syncUpdate(manifest).then((failedPaths) => ({ manifest, failedPaths })),
+    )
+    .then(({ manifest, failedPaths }) =>
+      cleanupOrphans(failedPaths).then(() => manifest),
+    )
     .then(
       (manifest) => (
-        setTimeout(() => delete syncManifest.promise, 60000),
+        setTimeout(() => delete syncManifest.promise, 6e4),
         manifest
       ),
       (reason) => {
@@ -116,30 +154,58 @@ async function syncManifest() {
 async function syncUpdate(manifest) {
   const oldHashes = await getAllHashes();
   const updates = Object.entries(manifest).filter(
-    ([k, h]) => oldHashes[k] !== h,
+    ([key, hash]) => oldHashes[key] !== hash,
   );
   if (updates.length === 0) return;
 
+  const failedPaths = new Set();
   const cache = await caches.open(CACHE_NAME);
-  await Promise.allSettled(
+
+  const results = await Promise.allSettled(
     updates.map(([key, hash]) =>
-      fetch(key)
-        .then((res) => {
-          if (res.ok) cache.put(key + "#" + hash, res.clone());
-        })
-        .catch(() => {}),
+      workOnce(key, async () => {
+        const res = await fetchWithTimeout(key);
+        if (res.ok) await cache.put(key + "#" + hash, res.clone());
+        else failedPaths.add(key);
+        return res;
+      }),
     ),
   );
+
+  results.forEach((r, i) => {
+    if (r.status === "rejected") failedPaths.add(updates[i][0]);
+  });
+
   await bulkSetHashes(manifest);
 
-  self.clients.matchAll().then((cs) => {
-    for (const c of cs) c.postMessage({ type: "sw-updated" });
-  });
+  const failedCount = failedPaths.size;
+  if (failedCount > 0)
+    console.warn(
+      "syncUpdate: " + failedCount + "/" + updates.length + " files 失败",
+      [...failedPaths],
+    );
+
+  const succeededCount = updates.length - failedCount;
+  if (succeededCount > 0)
+    self.clients
+      .matchAll()
+      .then((clients) =>
+        clients.forEach((client) => client.postMessage({ type: "sw-updated" })),
+      );
+
+  return failedPaths;
 }
 
-async function cleanupOrphans() {
+async function cleanupOrphans(failedPaths) {
   const manifest = await getAllHashes();
-  if (Object.keys(manifest).length < 3) return;
+  if (Object.keys(manifest).length < 3) {
+    console.warn(
+      "cleanupOrphans: manifest 条目过少(" +
+        Object.keys(manifest).length +
+        ")，跳过本次清理",
+    );
+    return;
+  }
   const cache = await caches.open(CACHE_NAME);
   const requests = await cache.keys();
   return Promise.all(
@@ -148,6 +214,7 @@ async function cleanupOrphans() {
         const u = new URL(req.url);
         const pn = u.pathname;
         if (pn.startsWith("/file/")) return false;
+        if (failedPaths?.has(pn)) return false;
         const expectedHash = manifest[pn];
         if (expectedHash === undefined) return true;
         return u.hash.slice(1) !== expectedHash;
