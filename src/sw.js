@@ -86,7 +86,7 @@ let cachedPaths = new Map();
 let cachedPathsReady = false;
 
 // 顶层初始化：如果 bulkSetHashes 已经跑过，就不覆盖
-const initHashes = getAllHashes().then(
+getAllHashes().then(
   (hashes) => {
     if (!cachedPathsReady) {
       cachedPaths = new Map(Object.entries(hashes));
@@ -169,7 +169,7 @@ async function syncUpdate(manifest) {
   const merged = { ...oldHashes };
   let succeeded = 0;
 
-  const results = await Promise.allSettled(
+  await Promise.allSettled(
     updates.map(([key, hash]) =>
       workOnce(key, async () => {
         const res = await fetchWithTimeout(key);
