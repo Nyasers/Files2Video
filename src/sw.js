@@ -75,6 +75,7 @@ async function bulkSetHashes(manifest) {
     Object.entries(manifest).forEach(([key, hash]) => store.put({ key, hash }));
     tx.oncomplete = () => {
       cachedPaths = new Map(Object.entries(manifest));
+      cachedPathsReady = true;
       resolve();
     };
     tx.onerror = () => reject(tx.error);
@@ -82,11 +83,17 @@ async function bulkSetHashes(manifest) {
 }
 
 let cachedPaths = new Map();
-getAllHashes().then(
+let cachedPathsReady = false;
+
+// 顶层初始化：如果 bulkSetHashes 已经跑过，就不覆盖
+const initHashes = getAllHashes().then(
   (hashes) => {
-    cachedPaths = new Map(Object.entries(hashes));
+    if (!cachedPathsReady) {
+      cachedPaths = new Map(Object.entries(hashes));
+      cachedPathsReady = true;
+    }
   },
-  () => {},
+  () => { cachedPathsReady = true; },
 );
 
 // ── workOnce: 相同 key 的并发请求合并 ──
@@ -114,8 +121,12 @@ const FETCH_TIMEOUT = 10000;
 function fetchWithTimeout(url, ms) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms || FETCH_TIMEOUT);
-  return fetch(url === "/index.html" ? "/" : url, {
+  // 加时间戳，避免 Cloudflare CDN 边缘节点返回 stale 内容
+  const separator = url.includes("?") ? "&" : "?";
+  const cacheBustUrl = url + separator + "_t=" + Date.now();
+  return fetch(url === "/index.html" ? "/" : cacheBustUrl, {
     signal: controller.signal,
+    cache: "no-cache",
   }).finally(() => clearTimeout(timer));
 }
 
