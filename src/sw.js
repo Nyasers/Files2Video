@@ -616,6 +616,13 @@ async function serveFromCache(request, event) {
     cache = await caches.open(CACHE_NAME);
     pn = resolvePath(new URL(request.url).pathname);
     hash = cachedPaths.get(pn);
+
+    // 无 hash：可能是新部署后首次访问，同步 manifest 再查一次
+    if (!hash) {
+      await syncManifest().catch(() => {});
+      hash = cachedPaths.get(pn);
+    }
+
     if (hash) {
       const cached = await cache.match(pn + "#" + hash);
       if (cached) return cached;
@@ -626,7 +633,6 @@ async function serveFromCache(request, event) {
     return res;
   } catch (e) {
     console.warn("serveFromCache fallback to network:", e?.message);
-    // 最后的回退：绕过缓存层直接网络请求
     return fetch(request).catch(() =>
       new Response("Offline", {
         status: 503,
