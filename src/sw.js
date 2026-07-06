@@ -133,12 +133,7 @@ async function syncManifest() {
       for (const [key, hash] of Object.entries(raw)) m["/" + key] = hash;
       return m;
     })
-    .then((manifest) =>
-      syncUpdate(manifest).then((failedPaths) => ({ manifest, failedPaths })),
-    )
-    .then(({ manifest, failedPaths }) =>
-      cleanupOrphans(failedPaths).then(() => manifest),
-    )
+    .then((manifest) => syncUpdate(manifest))
     .then(
       (manifest) => (
         setTimeout(() => delete syncManifest.promise, 6e4),
@@ -156,71 +151,44 @@ async function syncUpdate(manifest) {
   const updates = Object.entries(manifest).filter(
     ([key, hash]) => oldHashes[key] !== hash,
   );
-  if (updates.length === 0) return;
+  if (updates.length === 0) return manifest;
 
-  const failedPaths = new Set();
   const cache = await caches.open(CACHE_NAME);
+  // 从旧 hash 出发，逐文件升级：成功才替换，失败保留旧记录
+  const merged = { ...oldHashes };
+  let succeeded = 0;
 
   const results = await Promise.allSettled(
     updates.map(([key, hash]) =>
       workOnce(key, async () => {
         const res = await fetchWithTimeout(key);
-        if (res.ok) await cache.put(key + "#" + hash, res.clone());
-        else failedPaths.add(key);
+        if (res.ok) {
+          await cache.put(key + "#" + hash, res.clone());
+          merged[key] = hash;
+          succeeded++;
+        }
         return res;
       }),
     ),
   );
 
-  results.forEach((r, i) => {
-    if (r.status === "rejected") failedPaths.add(updates[i][0]);
-  });
+  // 只持久化实际成功的 hash，失败的保留旧 hash（旧缓存继续服务）
+  await bulkSetHashes(merged);
 
-  await bulkSetHashes(manifest);
-
-  const failedCount = failedPaths.size;
-  if (failedCount > 0)
+  const failed = updates.length - succeeded;
+  if (failed > 0)
     console.warn(
-      "syncUpdate: " + failedCount + "/" + updates.length + " files 失败",
-      [...failedPaths],
+      "syncUpdate: " + failed + "/" + updates.length + " files 失败",
     );
 
-  const succeededCount = updates.length - failedCount;
-  if (succeededCount > 0)
+  if (succeeded > 0)
     self.clients
       .matchAll()
       .then((clients) =>
         clients.forEach((client) => client.postMessage({ type: "sw-updated" })),
       );
 
-  return failedPaths;
-}
-
-async function cleanupOrphans(failedPaths) {
-  const manifest = await getAllHashes();
-  if (Object.keys(manifest).length < 3) {
-    console.warn(
-      "cleanupOrphans: manifest 条目过少(" +
-        Object.keys(manifest).length +
-        ")，跳过本次清理",
-    );
-    return;
-  }
-  const cache = await caches.open(CACHE_NAME);
-  const requests = await cache.keys();
-  return Promise.all(
-    requests
-      .filter((req) => {
-        const u = new URL(req.url);
-        const pn = u.pathname;
-        if (pn.startsWith("/file/")) return false;
-        if (failedPaths?.has(pn)) return false;
-        const expectedHash = manifest[pn];
-        if (expectedHash === undefined) return true;
-        return u.hash.slice(1) !== expectedHash;
-      })
-      .map((req) => cache.delete(req)),
-  );
+  return merged;
 }
 
 // ── 生命周期 ──
@@ -229,14 +197,15 @@ self.addEventListener("install", () => self.skipWaiting());
 
 self.addEventListener("activate", (event) => {
   event.waitUntil(
-    syncManifest()
-      .catch((e) => console.warn("syncManifest 失败:", e))
-      .then(() => self.clients.claim())
+    // 先 claim，再后台预热缓存
+    self.clients
+      .claim()
       .then(() =>
         self.clients.matchAll().then((cs) => {
           for (const c of cs) c.postMessage({ type: "sw-ready" });
         }),
-      ),
+      )
+      .then(() => syncManifest().catch((e) => console.warn("syncManifest 失败:", e))),
   );
 });
 
@@ -521,18 +490,15 @@ function listJobs(event) {
 
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
-
-  if (event.request.mode === "navigate") {
-    event.waitUntil(syncManifest().catch(() => {}));
-  }
+  const pn = url.pathname;
 
   // 流式下载路由: /files?id=X → 302 → /file/hash/name
-  if (url.pathname === "/files") {
+  if (pn === "/files") {
     event.respondWith(handleFilesRoute(event, url));
     return;
   }
 
-  if (url.pathname.startsWith("/file/")) {
+  if (pn.startsWith("/file/")) {
     event.respondWith(serveEncodedFile(event));
     return;
   }
@@ -645,23 +611,28 @@ async function serveDecodedStream(event, ctx, route) {
 }
 
 async function serveFromCache(request, event) {
-  const cache = await caches.open(CACHE_NAME);
-  const pn = resolvePath(new URL(request.url).pathname);
-  const hash = cachedPaths.get(pn);
-  if (hash) {
-    const cached = await cache.match(pn + "#" + hash);
-    if (cached) return cached;
-  }
+  let cache, pn, hash;
   try {
+    cache = await caches.open(CACHE_NAME);
+    pn = resolvePath(new URL(request.url).pathname);
+    hash = cachedPaths.get(pn);
+    if (hash) {
+      const cached = await cache.match(pn + "#" + hash);
+      if (cached) return cached;
+    }
     const res = await fetch(request);
-    if (res.ok && hash)
+    if (res.ok && hash && cache)
       event.waitUntil(cache.put(pn + "#" + hash, res.clone()));
     return res;
-  } catch {
-    return new Response("Offline", {
-      status: 503,
-      headers: { "Content-Type": "text/plain" },
-    });
+  } catch (e) {
+    console.warn("serveFromCache fallback to network:", e?.message);
+    // 最后的回退：绕过缓存层直接网络请求
+    return fetch(request).catch(() =>
+      new Response("Offline", {
+        status: 503,
+        headers: { "Content-Type": "text/plain" },
+      }),
+    );
   }
 }
 

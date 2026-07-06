@@ -11,6 +11,7 @@ try {
   const { readFileSync, readdirSync } = await import("fs");
   const files = readdirSync(dist);
   for (const f of files) {
+    if (f === "sw.js") continue; // SW 自身不需要缓存
     if (f.endsWith(".html") || f.endsWith(".js") || f.endsWith(".css")) {
       const buf = readFileSync(join(dist, f));
       manifest[f] = createHash("sha256").update(buf).digest("hex").slice(0, 16);
