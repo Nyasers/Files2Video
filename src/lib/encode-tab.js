@@ -89,13 +89,12 @@ function getRes() {
 }
 
 function updateInfo() {
-  // 信息已整合到文件列表头部，encInfo 留空
   encInfo.textContent = "";
+  if (files.length > 0) renderFileList();
 }
 
-[encResolution, encFps].forEach((el) =>
-  el.addEventListener("change", updateInfo),
-);
+encResolution.addEventListener("change", updateInfo);
+encFps.addEventListener("change", updateInfo);
 
 // ── 生成 ──
 
