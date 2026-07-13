@@ -792,9 +792,10 @@ async function serveEncodedFile(event) {
 
   encodeStreamsByJob.delete(hash);
 
+  const hdrDispo = 'attachment; filename="' + entry.fileName + '"';
   const headers = new Headers({
     "Content-Type": entry.mime || "video/avi",
-    "Content-Disposition": 'attachment; filename="' + entry.fileName + '"',
+    "Content-Disposition": hdrDispo,
     "Content-Length": String(entry.fileSize),
   });
   return new Response(entry.stream, { headers });
@@ -839,9 +840,12 @@ async function serveDecodedStream(event, ctx, route) {
     },
   });
 
+  const asciiFallback = entry.name.replace(/[^\x20-\x7E]/g, '_') || 'download';
+  const hdrDispo = 'attachment; filename="' + asciiFallback
+    + '"; filename*=UTF-8\'\'' + encodeURIComponent(entry.name);
   const headers = new Headers({
     "Content-Type": "application/octet-stream",
-    "Content-Disposition": 'attachment; filename="' + entry.name + '"',
+    "Content-Disposition": hdrDispo,
   });
   if (fileSize) headers.set("Content-Length", String(fileSize));
 
