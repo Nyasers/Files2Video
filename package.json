@@ -1,7 +1,7 @@
 {
   "name": "f2v",
   "version": "1.0.0",
-  "description": "AVI 直写直读，文件隐写不压缩",
+  "description": "ISOBMFF 容器封装，文件隐写不压缩",
   "private": true,
   "scripts": {
     "build": "rspack build --config rspack.config.cjs",

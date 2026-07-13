@@ -30,8 +30,14 @@ import {
 import {
   parseAVI,
   readFrame0,
-  extractFileDataRange,
+  extractFileDataRange as extractFileDataRangeV1,
 } from "./lib/coders/f2v1-decode.js";
+import { buildMP4Boxes } from "./lib/coders/f2v2-encode.js";
+import {
+  parseMP4,
+  readFrame0V2,
+  extractFileDataRange as extractFileDataRangeV2,
+} from "./lib/coders/f2v2-decode.js";
 
 // ── PWA 缓存 ──
 
@@ -240,8 +246,14 @@ self.addEventListener("message", (event) => {
     case "f2v-encode":
       event.waitUntil(handleEncode(event, msg));
       break;
+    case "f2v2-encode":
+      event.waitUntil(handleEncodeV2(event, msg));
+      break;
     case "f2v-decode":
       event.waitUntil(handleDecode(event, msg));
+      break;
+    case "f2v2-decode":
+      event.waitUntil(handleDecodeV2(event, msg));
       break;
     case "list-jobs":
       listJobs(event);
@@ -476,6 +488,217 @@ async function handleDecode(event, msg) {
 }
 
 // ═══════════════════════════════════════════════
+// V2 编码处理（ISOBMFF MP4）
+// ═══════════════════════════════════════════════
+
+async function handleEncodeV2(event, msg) {
+  const { jobId, files, password, w, h, fps, chunkSize, frameInfo: fi } = msg;
+  if (!files?.length) {
+    postMsg(event, { type: "job-error", jobId, error: "无文件" });
+    return;
+  }
+
+  try {
+    const frameInfo = fi;
+    const boxes = buildMP4Boxes(frameInfo, w, h, fps);
+
+    const job = {
+      kind: "encode",
+      format: "f2v2",
+      status: "running",
+      progress: -1,
+      cancelled: false,
+      label: files.length + " 个文件编码 (F2V2)",
+    };
+    encodeJobs.set(jobId, job);
+
+    const client = event.source;
+
+    postMsg(event, {
+      type: "job-new",
+      jobId,
+      kind: "encode",
+      format: "f2v2",
+      status: "running",
+      label: job.label,
+    });
+
+    const shortId = Date.now().toString(36);
+    const fileName = "F2V." + shortId + ".mp4";
+
+    const { frames, totalFrames, fileTotalData } = frameInfo;
+    const totalData = fileTotalData || 1;
+    const prefixSum = [0];
+    for (let i = 1; i < frames.length; i++)
+      prefixSum[i] = prefixSum[i - 1] + (frames[i - 1]?.dataSize || 0);
+
+    const stream = new ReadableStream({
+      async start(controller) {
+        const push = (d) => controller.enqueue(d);
+        const closeStream = () => { try { controller.close(); } catch {} };
+        const isCancelled = () => job.cancelled;
+
+        const sendCancelled = () => {
+          const cm = { type: "job-cancelled", jobId };
+          if (client) client.postMessage(cm);
+          else postMsg(event, cm);
+        };
+
+        const report = (fraction, idx) => {
+          const cb = prefixSum[idx] || 0;
+          const ds = frames[idx]?.dataSize || 0;
+          const overall = (cb + fraction * ds) / totalData;
+          const pct = Math.min(100, Math.round(overall * 100));
+          if (pct !== job.progress) {
+            job.progress = pct;
+            const pm = {
+              type: "job-progress",
+              jobId,
+              progress: pct,
+              currentFile: "[" + (idx + 1) + "/" + totalFrames + "]",
+            };
+            if (client) client.postMessage(pm);
+            else postMsg(event, pm);
+          }
+        };
+
+        try {
+          if (client)
+            client.postMessage({
+              type: "job-progress", jobId, progress: 1, currentFile: "初始化...",
+            });
+
+          // ── ftyp ──
+          push(boxes.ftyp);
+
+          // ── moov ──
+          push(boxes.moovHdr);
+          push(boxes.mvhd);
+          push(boxes.trakHdr);
+          push(boxes.tkhd);
+          push(boxes.mdiaHdr);
+          push(boxes.mdhd);
+          push(boxes.hdlr);
+          push(boxes.minfHdr);
+          push(boxes.vmhd);
+          push(boxes.dinfHdr);
+          push(boxes.dref);
+          push(boxes.stblHdr);
+          push(boxes.stsd);
+          push(boxes.stts);
+          push(boxes.stsc);
+          push(boxes.stsz);
+          push(boxes.co64);
+
+          // ── mdat header ──
+          push(boxes.mdatHdr);
+
+          if (isCancelled()) { closeStream(); sendCancelled(); return; }
+
+          const params = await prepareIndexParams(files, password, frameInfo.nameBufs);
+          if (isCancelled()) { closeStream(); sendCancelled(); return; }
+
+          // ── sample 0: 帧 0（无 chunk header） ──
+          const cumulative = await encodeFrame0(push, params, frames[0], {
+            onProgress: (f) => report(f, 0),
+          });
+          if (isCancelled()) { closeStream(); sendCancelled(); return; }
+
+          // ── sample 1..N-1: 数据帧（无 chunk header, 无 WORD 对齐） ──
+          let cumulativeEncrypted = cumulative;
+          for (let i = 1; i < frames.length; i++) {
+            if (isCancelled()) { closeStream(); sendCancelled(); return; }
+            cumulativeEncrypted += await encodeDataFrame(
+              push, frames[i], files,
+              params.encKey, params.frameSalt, cumulativeEncrypted,
+              { chunkSize, isCancelled, onProgress: (f) => report(f, i) },
+            );
+          }
+
+          closeStream();
+          job.status = "done";
+          const doneMsg = { type: "job-done", jobId };
+          if (client) client.postMessage(doneMsg);
+          else postMsg(event, doneMsg);
+        } catch (e) {
+          controller.error(e);
+          job.status = "error";
+          console.error("f2v2 encode stream error:", e);
+          const errMsg = { type: "job-error", jobId, error: e.message, kind: "encode" };
+          if (client) client.postMessage(errMsg);
+          else postMsg(event, errMsg);
+        }
+      },
+      cancel() {
+        job.cancelled = true;
+      },
+    });
+
+    encodeStreamsByJob.set(jobId, {
+      stream,
+      fileName,
+      fileSize: boxes.totalFileSize,
+      mime: "video/mp4",
+    });
+
+    postMsg(event, {
+      type: "f2v-encode-ready",
+      jobId,
+      fileName,
+      fileSize: boxes.totalFileSize,
+      format: "f2v2",
+    });
+  } catch (e) {
+    postMsg(event, {
+      type: "job-error",
+      jobId,
+      error: e.message,
+      kind: "encode",
+    });
+  }
+}
+
+// ═══════════════════════════════════════════════
+// V2 解码处理（ISOBMFF MP4）
+// ═══════════════════════════════════════════════
+
+async function handleDecodeV2(event, msg) {
+  const { jobId, file, password } = msg;
+  if (!file) {
+    postMsg(event, { type: "job-error", jobId, error: "无文件" });
+    return;
+  }
+
+  try {
+    const mp4Info = await parseMP4(file);
+    const indexInfo = await readFrame0V2(file, mp4Info.metaFrame, password);
+
+    decodeContexts.set(jobId, {
+      file,
+      mp4Info,
+      indexInfo,
+      entries: indexInfo.entries,
+      format: "f2v2",
+    });
+
+    postMsg(event, {
+      type: "f2v-decode-result",
+      jobId,
+      entries: indexInfo.entries,
+      totalSize: mp4Info.totalFileData,
+      format: "f2v2",
+    });
+  } catch (e) {
+    postMsg(event, {
+      type: "job-error",
+      jobId,
+      error: e.message,
+      kind: "decode",
+    });
+  }
+}
+
+// ═══════════════════════════════════════════════
 // 任务列表查询
 // ═══════════════════════════════════════════════
 
@@ -570,7 +793,7 @@ async function serveEncodedFile(event) {
   encodeStreamsByJob.delete(hash);
 
   const headers = new Headers({
-    "Content-Type": "video/avi",
+    "Content-Type": entry.mime || "video/avi",
     "Content-Disposition": 'attachment; filename="' + entry.fileName + '"',
     "Content-Length": String(entry.fileSize),
   });
@@ -578,9 +801,13 @@ async function serveEncodedFile(event) {
 }
 
 async function serveDecodedStream(event, ctx, route) {
-  const { file, indexInfo, aviInfo } = ctx;
+  const { file, indexInfo, mp4Info, aviInfo } = ctx;
   const entry = indexInfo.entries[route.idx];
   if (!entry) return new Response("Entry not found", { status: 404 });
+
+  const isV2 = ctx.format === "f2v2";
+  const dataFrames = isV2 ? mp4Info.dataFrames : aviInfo.dataFrames;
+  const extractFn = isV2 ? extractFileDataRangeV2 : extractFileDataRangeV1;
 
   fileRoutes.delete(route.hash);
 
@@ -593,10 +820,10 @@ async function serveDecodedStream(event, ctx, route) {
         let offset = 0;
         while (offset < fileSize) {
           const take = Math.min(CHUNK, fileSize - offset);
-          const chunk = await extractFileDataRange(
+          const chunk = await extractFn(
             file,
             indexInfo,
-            aviInfo.dataFrames,
+            dataFrames,
             route.idx,
             offset,
             take,

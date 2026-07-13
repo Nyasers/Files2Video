@@ -158,7 +158,7 @@
 
     <main hidden>
       <h1>&#x1F4E6; F2V <small>Files to Video</small></h1>
-      <div class="sub">AVI 直写直读，文件隐写不压缩。</div>
+      <div class="sub">ISOBMFF 容器封装，文件隐写不压缩。</div>
 
       <div class="top-bar">
         <div class="mode-tabs">
@@ -225,10 +225,10 @@
         <div class="card">
           <label>&#x1F4E4; 选择视频</label>
           <div class="drop-zone" id="decDrop">
-            <input type="file" id="decInput" accept=".avi" />
+            <input type="file" id="decInput" accept=".avi,.mp4" />
             <div class="icon">&#x1F3AC;</div>
-            <div class="text" id="decText">拖放 AVI 文件，或点击选择</div>
-            <div class="hint" id="decHint">F2V1 格式的 AVI 文件</div>
+            <div class="text" id="decText">拖放 F2V 文件，或点击选择</div>
+            <div class="hint" id="decHint">F2V1 (AVI) 或 F2V2 (MP4)</div>
           </div>
           <div class="pwd-row">
             <input

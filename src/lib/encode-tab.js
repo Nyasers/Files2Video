@@ -1,8 +1,7 @@
-// 编码 Tab — 文件选择 + 分辨率设置 + 生成 AVI
-// 文件对象直接 postMessage 给 SW（File 跨进程传的是句柄，不传数据）
+// 编码 Tab — 文件选择 + 分辨率设置 + 生成 MP4 (F2V2)
 "use strict";
 
-import { fmt, precomputeFrames } from "./f2v-core.js";
+import { fmt, precomputeFramesV2 } from "./f2v-core.js";
 import { clone } from "./template.js";
 import { swSend } from "./sw-client.js";
 import { showToast, getChunkSize, showTab } from "./ui-shell.js";
@@ -57,7 +56,7 @@ function renderFileList() {
   let summary = "共 " + files.length + " 个文件";
   try {
     const { w, h } = getRes();
-    const fi = precomputeFrames(files, w, h);
+    const fi = precomputeFramesV2(files, w, h);
     summary += " · " + fmt(fi.fileTotalData) + " · " + fi.totalFrames + " 帧";
   } catch (e) {
     summary += " · " + fmt(files.reduce((s, f) => s + f.size, 0));
@@ -89,8 +88,22 @@ function getRes() {
 }
 
 function updateInfo() {
-  encInfo.textContent = "";
-  if (files.length > 0) renderFileList();
+  if (encInfo) encInfo.textContent = "";
+  if (files.length > 0) refreshSummary();
+}
+
+function refreshSummary() {
+  const el = fileList.querySelector(".enc-file-summary");
+  if (!el) return;
+  let summary = "共 " + files.length + " 个文件";
+  try {
+    const { w, h } = getRes();
+    const fi = precomputeFramesV2(files, w, h);
+    summary += " · " + fmt(fi.fileTotalData) + " · " + fi.totalFrames + " 帧";
+  } catch (e) {
+    summary += " · " + fmt(files.reduce((s, f) => s + f.size, 0));
+  }
+  el.textContent = summary;
 }
 
 encResolution.addEventListener("change", updateInfo);
@@ -106,7 +119,7 @@ encBtn.addEventListener("click", async () => {
 
   let frameInfo;
   try {
-    frameInfo = precomputeFrames(files, w, h);
+    frameInfo = precomputeFramesV2(files, w, h);
   } catch (e) {
     showToast("⚠ " + e.message);
     return;
@@ -115,9 +128,8 @@ encBtn.addEventListener("click", async () => {
   const jobId =
     Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   const CHUNK = getChunkSize();
-
   swSend({
-    type: "f2v-encode",
+    type: "f2v2-encode",
     jobId,
     files,
     password: pwd,
@@ -140,7 +152,7 @@ encBtn.addEventListener("click", async () => {
   files = [];
   renderFileList();
   encBtn.disabled = true;
-  encInfo.textContent = "";
+  if (encInfo) encInfo.textContent = "";
   showTab("tasks");
 });
 
@@ -150,7 +162,7 @@ clearBtn.addEventListener("click", () => {
   files = [];
   renderFileList();
   encBtn.disabled = true;
-  encInfo.textContent = "";
+  if (encInfo) encInfo.textContent = "";
 });
 
 // ── SW 消息（仅处理 f2v-encode-ready 下载触发器） ──

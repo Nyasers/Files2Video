@@ -311,6 +311,77 @@ export function precomputeFrames(files, w, h) {
   };
 }
 
+/**
+ * CRAFT-2 帧布局：帧结构不变，但 sampleSize 不含 AVI chunk 头
+ * 帧 0 sample = FRAME0_HEADER_SIZE + frame0EncData
+ * 数据帧 sample = dataSize (无 8B header, 无 WORD 对齐)
+ */
+export function precomputeFramesV2(files, w, h) {
+  let fileListSize = 0;
+  const nameBufs = [];
+  for (const f of files) {
+    const nb = new TextEncoder().encode(f.name);
+    nameBufs.push(nb);
+    fileListSize += 2 + 8 + nb.length;
+  }
+
+  const fileTotalData = files.reduce((s, f) => s + f.size, 0);
+  const bytesPerFrame = w * h * BPP;
+
+  const frame0EncData = 8 + fileListSize;
+
+  if (frame0EncData > bytesPerFrame - FRAME0_HEADER_SIZE) {
+    throw new Error(
+      "文件列表容量不足：至少需要 " +
+        (FRAME0_HEADER_SIZE + frame0EncData) +
+        " / 帧，当前 " +
+        bytesPerFrame +
+        " / 帧",
+    );
+  }
+
+  const dataPerFrame = bytesPerFrame;
+  const dataFrameCount =
+    fileTotalData > 0 ? Math.ceil(fileTotalData / dataPerFrame) : 0;
+  const totalFrames = 1 + dataFrameCount;
+
+  const frames = [];
+  let dataOff = 0;
+
+  frames.push({
+    frameID: 0,
+    isMeta: true,
+    encStart: FRAME0_HEADER_SIZE,
+    dataSize: frame0EncData,
+    sampleSize: FRAME0_HEADER_SIZE + frame0EncData,
+    dataOffset: 0,
+  });
+
+  for (let i = 1; i < totalFrames; i++) {
+    const rem = fileTotalData - (i - 1) * dataPerFrame;
+    const ds = Math.min(rem, dataPerFrame);
+    frames.push({
+      frameID: i,
+      isMeta: false,
+      encStart: 0,
+      dataSize: ds,
+      sampleSize: ds,
+      dataOffset: dataOff,
+    });
+    dataOff += ds;
+  }
+
+  return {
+    totalFrames,
+    fileListSize,
+    fileTotalData,
+    frames,
+    nameBufs,
+    bytesPerFrame,
+    fileCount: files.length,
+  };
+}
+
 // ═══════════════════════════════════════════════
 // AVI 索引表构建
 // ═══════════════════════════════════════════════

@@ -1,4 +1,4 @@
-// 解码 Tab — AVI 选择 + 文件提取（SW 流式解码）
+// 解码 Tab — 文件选择 + 格式检测 + 文件提取（SW 流式解码）
 "use strict";
 
 import { fmt } from "./f2v-core.js";
@@ -15,8 +15,21 @@ const decFileList = document.getElementById("decFileList");
 const decText = document.getElementById("decText");
 const decHint = document.getElementById("decHint");
 
-let aviFile = null;
+let decFile = null;
+let decFormat = "";          // "f2v1" | "f2v2"
 let currentJobId = null;
+
+// ── 格式检测 ──
+
+async function detectFormat(file) {
+  const hdr = new Uint8Array(await file.slice(0, 12).arrayBuffer());
+  if (hdr.length < 12) return "";
+  // ISOBMFF: bytes 4-7 = 'ftyp'
+  if (hdr[4] === 0x66 && hdr[5] === 0x74 && hdr[6] === 0x79 && hdr[7] === 0x70) return "f2v2";
+  // RIFF: bytes 0-3 = 'RIFF'
+  if (hdr[0] === 0x52 && hdr[1] === 0x49 && hdr[2] === 0x46 && hdr[3] === 0x46) return "f2v1";
+  return "";
+}
 
 // ── 拖放 / 选择 ──
 
@@ -34,12 +47,22 @@ decDrop.addEventListener("drop", (e) => {
   handleFile(e.dataTransfer.files[0]);
 });
 
-function handleFile(file) {
+async function handleFile(file) {
   if (!file) return;
-  aviFile = file;
+  decFile = file;
   currentJobId = null;
   decText.textContent = file.name + " (" + fmt(file.size) + ")";
-  decHint.textContent = "F2V1 格式";
+
+  decFormat = await detectFormat(file);
+  if (decFormat === "f2v2") {
+    decHint.textContent = "F2V2 格式 (MP4)";
+  } else if (decFormat === "f2v1") {
+    decHint.textContent = "F2V1 格式 (AVI)";
+  } else {
+    decHint.textContent = "⚠ 未知格式";
+    decBtn.disabled = true;
+    return;
+  }
   decBtn.disabled = false;
   decFileList.style.display = "none";
   decFileList.innerHTML = "";
@@ -48,7 +71,7 @@ function handleFile(file) {
 // ── 提取 ──
 
 decBtn.addEventListener("click", () => {
-  if (!aviFile) return;
+  if (!decFile) return;
   const pwd = decPwd.value;
   decBtn.disabled = true;
   decHint.textContent = "正在提取...";
@@ -56,10 +79,12 @@ decBtn.addEventListener("click", () => {
   currentJobId =
     Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
+  const msgType = decFormat === "f2v2" ? "f2v2-decode" : "f2v-decode";
+
   swSend({
-    type: "f2v-decode",
+    type: msgType,
     jobId: currentJobId,
-    file: aviFile,
+    file: decFile,
     password: pwd,
   });
 });
@@ -67,11 +92,12 @@ decBtn.addEventListener("click", () => {
 // ── 清空 ──
 
 decClearBtn.addEventListener("click", () => {
-  aviFile = null;
+  decFile = null;
+  decFormat = "";
   currentJobId = null;
   decInput.value = "";
-  decText.textContent = "拖放 AVI 文件，或点击选择";
-  decHint.textContent = "F2V1 格式的 AVI 文件";
+  decText.textContent = "拖放 F2V 文件，或点击选择";
+  decHint.textContent = "F2V1 (AVI) 或 F2V2 (MP4)";
   decBtn.disabled = true;
   decFileList.style.display = "none";
   decFileList.innerHTML = "";
