@@ -3,6 +3,7 @@
 const rspack = require("@rspack/core");
 const path = require("path");
 const { execSync } = require("child_process");
+const { VueLoaderPlugin } = require("vue-loader");
 const isDev = process.env.NODE_ENV === "development";
 const distDir = path.resolve(__dirname, "dist");
 
@@ -20,6 +21,9 @@ module.exports = [
       filename: "main.js",
       clean: true,
     },
+    resolve: {
+      extensions: [".js", ".vue", ".json"],
+    },
     devServer: {
       port: 3000,
       hot: false,
@@ -31,6 +35,13 @@ module.exports = [
     module: {
       rules: [
         {
+          test: /\.vue$/,
+          loader: "vue-loader",
+          options: {
+            experimentalInlineMatchResource: true,
+          },
+        },
+        {
           test: /\.css$/,
           use: [rspack.CssExtractRspackPlugin.loader, "css-loader"],
           type: "javascript/auto",
@@ -38,6 +49,7 @@ module.exports = [
       ],
     },
     plugins: [
+      new VueLoaderPlugin(),
       new rspack.HtmlRspackPlugin({
         template: "./src/index.html",
         inject: true,
@@ -47,7 +59,10 @@ module.exports = [
       }),
       new rspack.CopyRspackPlugin({
         patterns: [
-          { from: path.resolve(__dirname, "src/assets"), noErrorOnMissing: true },
+          {
+            from: path.resolve(__dirname, "src/assets"),
+            noErrorOnMissing: true,
+          },
         ],
       }),
     ],

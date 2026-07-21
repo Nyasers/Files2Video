@@ -1,16 +1,26 @@
-// F2V 入口 — 模块导入 + SW 启动
+// ══════════════════════════════════════════════
+// F2V Vue 入口
+// ══════════════════════════════════════════════
 "use strict";
 
+// 浏览器兼容性检查
+(function checkCompat() {
+  try {
+    if (typeof crypto?.subtle?.encrypt !== "function") throw 0;
+    new Function("async function f(){var a;return a??=1}")();
+  } catch (_) {
+    document.body.innerHTML =
+      '<div style="color:#e5554a;padding:2rem;text-align:center;line-height:1.6">' +
+      "浏览器版本过低，请使用 Chrome 86+ / 现代浏览器</div>";
+    throw Error("browser too old");
+  }
+})();
+
+import { createApp } from "vue";
 import "./style.css";
+import App from "./App.vue";
 import { initSW } from "./lib/sw-client.js";
 
-// 各模块在 import 时自动注册 DOM 事件和 SW 消息订阅
-import "./lib/ui-shell.js";
-import "./lib/task-manager.js";
-import "./lib/encode-tab.js";
-import "./lib/decode-tab.js";
-
-// SW 启动
 initSW();
 
-if (window.deloading) window.deloading();
+createApp(App).mount("#app");
